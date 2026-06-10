@@ -1,0 +1,15 @@
+{
+  "rows_total": 20000,
+  "rows_filtered_non_informative": 563,
+  "unique_texts": 11321,
+  "fit_sample_size": 11321,
+  "natural_clusters_before_merge": 113,
+  "final_clusters": 49,
+  "outlier_pct_of_unique": 30.75,
+  "centroid_similarity_threshold": 0.2972,
+  "largest_cluster_share_pct": 15.51,
+  "silhouette_umap_space_fit_sample": 0.3089,
+  "model": "LazarusNLP/all-indo-e5-small-v4",
+  "min_cluster_size_used": 15,
+  "seed": 42
+}

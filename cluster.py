@@ -325,6 +325,150 @@ def get_top_docs_by_centroid(
 
 
 # ---------------------------------------------------------------------------
+# Graph analisis topik & meta-topik (Leiden community detection)
+# ---------------------------------------------------------------------------
+
+def build_topic_graph(
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    threshold: float = 0.25,
+) -> tuple[list[int], dict[tuple[int, int], float]]:
+    """
+    Bangun graph topik-ke-topik berdasarkan kemiripan kosinus antar sentroid.
+    Hanya ~50 node meski data puluhan juta — scalable by design.
+    """
+    topic_ids = sorted(set(labels.tolist()) - {-1, -2})
+    if len(topic_ids) < 2:
+        return topic_ids, {}
+    emb_f32 = np.asarray(embeddings, dtype=np.float32)
+    centroids = np.stack([emb_f32[labels == t].mean(axis=0) for t in topic_ids])
+    centroids /= np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-12
+    sim = centroids @ centroids.T
+    np.fill_diagonal(sim, 0)
+    edges: dict[tuple[int, int], float] = {}
+    for i, ti in enumerate(topic_ids):
+        for j, tj in enumerate(topic_ids):
+            if i < j and float(sim[i, j]) >= threshold:
+                edges[(ti, tj)] = float(sim[i, j])
+    print(f"[graph] {len(topic_ids)} topik, {len(edges)} edge "
+          f"(similarity threshold={threshold})")
+    return topic_ids, edges
+
+
+def detect_meta_topics(
+    topic_ids: list[int],
+    edges: dict[tuple[int, int], float],
+) -> dict[int, int]:
+    """
+    Jalankan Leiden algorithm pada graph topik untuk mengelompokkan topik
+    ke meta-topik. Returns {topic_id: meta_topic_id} (0-indexed).
+    """
+    import igraph as ig
+    import leidenalg
+
+    if not edges:
+        print("[graph] tidak ada edge — setiap topik menjadi meta-topiknya sendiri")
+        return {t: i for i, t in enumerate(topic_ids)}
+
+    idx_of = {t: i for i, t in enumerate(topic_ids)}
+    g = ig.Graph()
+    g.add_vertices(len(topic_ids))
+    g.add_edges([(idx_of[ti], idx_of[tj]) for ti, tj in edges])
+    g.es["weight"] = list(edges.values())
+
+    partition = leidenalg.find_partition(
+        g,
+        leidenalg.ModularityVertexPartition,
+        weights="weight",
+        seed=42,
+    )
+    meta = {topic_ids[node]: mid
+            for mid, community in enumerate(partition)
+            for node in community}
+    n_meta = len(set(meta.values()))
+    print(f"[graph] Leiden menemukan {n_meta} meta-topik dari {len(topic_ids)} topik")
+    return meta
+
+
+def visualize_topic_graph(
+    topic_ids: list[int],
+    edges: dict[tuple[int, int], float],
+    meta_map: dict[int, int],
+    topic_info: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    """Simpan visualisasi interaktif graph hubungan antar topik (HTML)."""
+    try:
+        import networkx as nx
+        import plotly.graph_objects as go
+    except ImportError:
+        print("[graph] networkx/plotly tidak tersedia, skip visualisasi graph")
+        return
+
+    G = nx.Graph()
+    size_map = dict(zip(topic_info["Topic"], topic_info["Count"]))
+    name_map = dict(zip(topic_info["Topic"], topic_info["Name"]))
+    for tid in topic_ids:
+        G.add_node(tid)
+    for (ti, tj), w in edges.items():
+        G.add_edge(ti, tj, weight=w)
+
+    pos = nx.spring_layout(G, seed=42, weight="weight",
+                           k=2.5 / max(len(topic_ids) ** 0.5, 1))
+
+    edge_traces = []
+    for ti, tj, data in G.edges(data=True):
+        x0, y0 = pos[ti]
+        x1, y1 = pos[tj]
+        edge_traces.append(go.Scatter(
+            x=[x0, x1, None], y=[y0, y1, None],
+            mode="lines",
+            line=dict(width=float(data.get("weight", 0.1)) * 4,
+                      color="rgba(150,150,150,0.4)"),
+            hoverinfo="none", showlegend=False,
+        ))
+
+    xs = [pos[t][0] for t in topic_ids]
+    ys = [pos[t][1] for t in topic_ids]
+    node_trace = go.Scatter(
+        x=xs, y=ys,
+        mode="markers+text",
+        text=[str(t) for t in topic_ids],
+        textposition="top center",
+        hovertext=[
+            f"<b>Topik {t}</b><br>{name_map.get(t, '')}"
+            f"<br>Meta-topik: {meta_map.get(t, '?')}"
+            f"<br>Jumlah post: {size_map.get(t, 0)}"
+            for t in topic_ids
+        ],
+        hoverinfo="text",
+        marker=dict(
+            size=[max(12, (size_map.get(t, 10) ** 0.5) * 2.5) for t in topic_ids],
+            color=[meta_map.get(t, 0) for t in topic_ids],
+            colorscale="Turbo",
+            showscale=True,
+            colorbar=dict(title="Meta-topik"),
+            line=dict(width=1.5, color="white"),
+        ),
+    )
+
+    fig = go.Figure(
+        data=edge_traces + [node_trace],
+        layout=go.Layout(
+            title="Graf Hubungan Antar Topik — warna = meta-topik (Leiden)",
+            showlegend=False,
+            hovermode="closest",
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            height=750,
+            margin=dict(l=20, r=20, t=50, b=20),
+        ),
+    )
+    fig.write_html(str(out_path))
+    print(f"[graph] graf topik disimpan ke {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Evaluasi / ekspor
 # ---------------------------------------------------------------------------
 
@@ -355,6 +499,8 @@ def export_results(
     topic_model,
     metrics: dict,
     centroid_docs_map: dict[int, list[str]] | None = None,
+    meta_map: dict[int, int] | None = None,
+    graph_edges: dict[tuple[int, int], float] | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -376,7 +522,15 @@ def export_results(
         info["Top5CentroidDocs"] = info["Topic"].map(
             lambda tid: " ||| ".join(centroid_docs_map.get(tid, []))
         )
+    if meta_map:
+        info["meta_topic"] = info["Topic"].map(meta_map)
     info.to_csv(out_dir / "topics_summary.csv", index=False)
+
+    if graph_edges:
+        pd.DataFrame(
+            [{"topic_a": ti, "topic_b": tj, "similarity": w}
+             for (ti, tj), w in graph_edges.items()]
+        ).to_csv(out_dir / "topic_graph_edges.csv", index=False)
 
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
@@ -389,6 +543,12 @@ def export_results(
             fn().write_html(str(out_dir / name))
         except Exception as exc:
             print(f"[export] {name} dilewati: {exc}")
+
+    if meta_map is not None and graph_edges is not None:
+        visualize_topic_graph(
+            [t for t in meta_map if t >= 0],
+            graph_edges, meta_map, info, out_dir / "topic_graph.html",
+        )
 
     topic_model.save(str(out_dir / "bertopic_model"), serialization="safetensors",
                      save_embedding_model=False)
@@ -449,6 +609,10 @@ def main() -> None:
     p.add_argument("--sample", type=int, default=0,
                    help="ambil sampel acak N baris input sebelum proses lain "
                         "(0 = pakai semua). Berguna untuk run percontohan")
+    p.add_argument("--graph-threshold", type=float, default=0.25,
+                   help="ambang kemiripan kosinus antar sentroid topik untuk membuat "
+                        "edge di graph (default: 0.25). Turunkan untuk lebih banyak "
+                        "koneksi, naikkan untuk hanya hubungan yang kuat.")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--device", default=None, help="cuda / cpu (otomatis jika tidak diisi)")
     p.add_argument("--seed", type=int, default=42)
@@ -581,12 +745,21 @@ def main() -> None:
 
     centroid_docs_map = get_top_docs_by_centroid(unique_texts, embeddings, all_labels)
 
+    # 7b. Graph analisis & meta-topik ------------------------------------------
+    topic_ids_graph, graph_edges = build_topic_graph(
+        embeddings, all_labels, threshold=args.graph_threshold,
+    )
+    meta_map = detect_meta_topics(topic_ids_graph, graph_edges)
+
     df["topic"] = df["clean_text"].map(label_map)
     df["topic"] = df["topic"].where(df["informative"], other=-2)  # -2 = sampah
     df["topic"] = df["topic"].fillna(-2).astype(int)
     df["topic_label"] = df["topic"].map(name_map)
     df.loc[df["topic"] == -2, "topic_label"] = "FILTERED_NON_INFORMATIVE"
     df.loc[df["topic"] == -1, "topic_label"] = "OUTLIER_NO_TOPIC"
+    df["meta_topic"] = df["topic"].map(meta_map)
+    df.loc[df["topic"] < 0, "meta_topic"] = df.loc[df["topic"] < 0, "topic"]
+    df["meta_topic"] = df["meta_topic"].fillna(-1).astype(int)
 
     # 8. Evaluasi + ekspor ------------------------------------------------------
     assigned = all_labels[all_labels >= 0]
@@ -619,7 +792,8 @@ def main() -> None:
         "seed": args.seed,
     }
     print(json.dumps(metrics, indent=2))
-    export_results(out_dir, df.drop(columns=["informative"]), topic_model, metrics, centroid_docs_map)
+    export_results(out_dir, df.drop(columns=["informative"]), topic_model, metrics,
+                   centroid_docs_map, meta_map, graph_edges)
 
 
 if __name__ == "__main__":
