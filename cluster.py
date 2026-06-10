@@ -35,8 +35,8 @@ import pandas as pd
 from preprocess import clean_text, is_informative, load_slang_lexicon, load_stopwords
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_LEXICON = HERE / "data" / "slang_lexicon.csv"
-DEFAULT_STOPWORDS = HERE / "data" / "stopwords_id.txt"
+DEFAULT_LEXICON = HERE / "slang_lexicon.csv"
+DEFAULT_STOPWORDS = HERE / "stopwords_id.txt"
 
 EMBED_CHUNK = 100_000          # jumlah teks yang di-encode per checkpoint
 ASSIGN_CHUNK = 200_000         # jumlah teks per batch sentroid-terdekat
@@ -54,8 +54,21 @@ def load_dataframe(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, sep="\t")
     if suffix == ".parquet":
         return pd.read_parquet(path)
-    if suffix in (".jsonl", ".json"):
+    if suffix == ".jsonl":
         return pd.read_json(path, lines=True)
+    if suffix == ".json":
+        import json as _json
+        with open(path, encoding="utf-8") as _f:
+            raw = _json.load(_f)
+        if isinstance(raw, list):
+            return pd.DataFrame(raw)
+        if isinstance(raw, dict):
+            # cari key pertama yang berisi list of dicts (misal: "posts", "data", "results")
+            for _, _val in raw.items():
+                if isinstance(_val, list) and _val and isinstance(_val[0], dict):
+                    return pd.DataFrame(_val)
+            return pd.DataFrame([raw])
+        raise ValueError(f"Struktur JSON tidak dikenali di {path}")
     raise ValueError(f"Format input tidak didukung: {suffix}")
 
 
