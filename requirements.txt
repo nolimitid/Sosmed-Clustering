@@ -9,3 +9,7 @@ hdbscan>=0.8.33
 pyarrow>=14.0          # parquet support
 plotly>=5.18           # BERTopic visualizations
 safetensors>=0.4
+langdetect>=1.0.9      # deteksi bahasa (fallback Python murni, selalu terpasang)
+# Backend deteksi bahasa yang disarankan untuk jutaan baris (jauh lebih cepat
+# daripada langdetect; roda prabangun, tanpa kompilator C). Opsional:
+#   pip install fasttext-wheel

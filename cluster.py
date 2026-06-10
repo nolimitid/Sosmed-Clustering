@@ -3,7 +3,8 @@ Pipeline klasterisasi untuk teks media sosial berbahasa Indonesia informal,
 dirancang agar mampu menangani jutaan baris.
 
 Pipeline:
-  muat -> bersihkan/normalkan -> saring sampah -> deduplikasi
+  muat -> bersihkan/normalkan -> deteksi & saring bahasa (buang non-Indonesia)
+       -> saring sampah -> deduplikasi
        -> embed (per-chunk, dapat dilanjutkan, memmap float16)
        -> latih BERTopic (UMAP + HDBSCAN + c-TF-IDF) pada sampel representatif
        -> tetapkan dokumen sisanya ke sentroid topik terdekat
@@ -32,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from language_id import LanguageDetector, lang_name
 from preprocess import clean_text, is_informative, load_slang_lexicon, load_stopwords
 
 HERE = Path(__file__).resolve().parent
@@ -425,6 +427,25 @@ def main() -> None:
                         "ke sentroid topik terdekat")
     p.add_argument("--keep-emoji", action="store_true")
     p.add_argument("--no-slang-norm", action="store_true")
+    p.add_argument("--no-lang-filter", action="store_true",
+                   help="lewati deteksi & penyaringan bahasa (proses semua bahasa)")
+    p.add_argument("--keep-langs", default="id,ms,jv,su,min,ban,ace",
+                   help="kode bahasa (ISO 639) yang dipertahankan, dipisah koma; "
+                        "baris yang DIYAKINI berbahasa lain dibuang. Default "
+                        "mencakup Indonesia + Melayu + bahasa daerah karena "
+                        "deteksi sering mengira teks Indonesia informal sebagai "
+                        "Melayu/daerah. Pakai 'id' saja untuk penyaringan ketat")
+    p.add_argument("--lang-backend", choices=["fasttext", "langdetect"],
+                   default="fasttext",
+                   help="backend deteksi bahasa yang diutamakan (jatuh ke yang "
+                        "lain bila tak terpasang)")
+    p.add_argument("--lang-model", default=None,
+                   help="path model fastText lid.176 (.ftz/.bin); diunduh "
+                        "otomatis ke ~/.cache bila kosong")
+    p.add_argument("--lang-min-conf", type=float, default=0.5,
+                   help="hanya buang baris berbahasa asing bila kepercayaan "
+                        "deteksi >= nilai ini; baris berkeyakinan rendah (mis. "
+                        "teks sangat pendek/campur kode) dipertahankan")
     p.add_argument("--sample", type=int, default=0,
                    help="ambil sampel acak N baris input sebelum proses lain "
                         "(0 = pakai semua). Berguna untuk run percontohan")
@@ -454,12 +475,54 @@ def main() -> None:
     df["clean_text"] = df[args.text_col].map(
         lambda t: clean_text(t, lexicon=lexicon, keep_emoji=args.keep_emoji)
     )
+
+    # 2b. Deteksi & saring bahasa: buang baris yang diyakini bukan Indonesia ----
+    # Deteksi dilakukan pada teks unik (lalu dipetakan ke semua baris) agar hemat
+    # pada korpus jutaan baris yang banyak duplikatnya.
+    detector = None
+    keep_langs: set[str] = set()
+    n_dropped_lang = 0
+    if not args.no_lang_filter:
+        keep_langs = {c.strip().lower() for c in args.keep_langs.split(",") if c.strip()}
+        detector = LanguageDetector.load(model_path=args.lang_model,
+                                         prefer=args.lang_backend)
+        print(f"[lang] backend: {detector.name}; dipertahankan: {sorted(keep_langs)}")
+        uniq_clean = df["clean_text"].drop_duplicates().tolist()
+        codes, confs = detector.detect_batch(uniq_clean)
+        code_map = dict(zip(uniq_clean, codes))
+        conf_map = dict(zip(uniq_clean, confs))
+        df["lang"] = df["clean_text"].map(code_map).fillna("und")
+        df["lang_conf"] = df["clean_text"].map(conf_map).fillna(0.0).round(3)
+
+        # Buang baris hanya jika DIYAKINI berbahasa asing: bahasa di luar keep_langs
+        # DAN kepercayaan >= ambang. Baris berkeyakinan rendah (teks sangat pendek /
+        # campur kode) dipertahankan agar teks Indonesia tidak salah buang.
+        foreign = (~df["lang"].isin(keep_langs)) & (df["lang_conf"] >= args.lang_min_conf)
+        n_dropped_lang = int(foreign.sum())
+        if n_dropped_lang and detector.available:
+            drop_counts = df.loc[foreign, "lang"].value_counts()
+            print(f"[lang] membuang {n_dropped_lang} baris non-Indonesia "
+                  f"({100 * n_dropped_lang / max(n_raw, 1):.1f}%):")
+            for code, cnt in drop_counts.head(15).items():
+                print(f"        {code:>5} {lang_name(code):<14} {cnt:>10}")
+            pd.DataFrame({
+                "lang": drop_counts.index,
+                "language": [lang_name(c) for c in drop_counts.index],
+                "rows_dropped": drop_counts.values,
+                "pct_of_input": (100 * drop_counts.values / max(n_raw, 1)).round(2),
+            }).to_csv(out_dir / "dropped_languages.csv", index=False)
+            print(f"[lang] ringkasan bahasa yang dibuang -> "
+                  f"{out_dir / 'dropped_languages.csv'}")
+        df = df[~foreign].reset_index(drop=True)
+        print(f"[lang] {len(df)}/{n_raw} baris dipertahankan setelah saring bahasa")
+
+    # 2c. Saring sampah (non-informatif) ---------------------------------------
     df["informative"] = df["clean_text"].map(
         lambda t: is_informative(t, stopwords, args.min_content_tokens)
     )
     n_junk = int((~df["informative"]).sum())
     print(f"[clean] disaring sebagai non-informatif: {n_junk} "
-          f"({100 * n_junk / max(n_raw, 1):.1f}%)")
+          f"({100 * n_junk / max(len(df), 1):.1f}%)")
 
     # 3. Deduplikasi: klaster teks unik, lalu propagasikan label ke semua baris
     work = df[df["informative"]]
@@ -531,6 +594,15 @@ def main() -> None:
     sil = compute_silhouette(topic_model, topics_fit_list)
     metrics = {
         "rows_total": n_raw,
+        "lang_filter_backend": detector.name if detector else "disabled",
+        "lang_kept": sorted(keep_langs) if keep_langs else None,
+        "rows_dropped_non_indonesian": int(n_dropped_lang),
+        "rows_after_language_filter": int(len(df)),
+        "kept_language_distribution_pct": (
+            {c: round(100 * n / max(len(df), 1), 2)
+             for c, n in df["lang"].value_counts().head(10).items()}
+            if "lang" in df.columns else None
+        ),
         "rows_filtered_non_informative": n_junk,
         "unique_texts": n_unique,
         "fit_sample_size": int(fit_n),

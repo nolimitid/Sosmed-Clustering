@@ -1,0 +1,9 @@
+# Large data dumps — exceed GitHub's 100 MB limit; keep these locally only
+report_raw_posts_*.json
+
+# Pipeline outputs (embedding cache/memmap can be several GB)
+results/
+
+# Python bytecode
+__pycache__/
+*.pyc

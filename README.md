@@ -4,9 +4,10 @@ Mengelompokkan postingan/komentar berbahasa Indonesia yang pendek dan informal
 ("tidak baku") dari Twitter/X, Facebook, Instagram, dll. ke dalam rentang target
 20–50 topik.
 
-Pipeline: **bersihkan → normalkan slang → saring sampah → deduplikasi →
-sentence embedding → UMAP → HDBSCAN → kata kunci c-TF-IDF (BERTopic) →
-gabungkan ke rentang target → ekspor.**
+Pipeline: **bersihkan → normalkan slang → deteksi & saring bahasa (buang
+non-Indonesia) → saring sampah → deduplikasi → sentence embedding → UMAP →
+HDBSCAN → kata kunci c-TF-IDF (BERTopic) → gabungkan ke rentang target →
+ekspor.**
 
 ## Mulai cepat
 
@@ -35,13 +36,22 @@ klasterisasi yang berbeda menjadi cepat.
 | `--min-cluster-size N` | Mengganti heuristik otomatis (`clip(fit_n/1000, 15, 500)`) |
 | `--keep-emoji` | Pertahankan emoji pada teks yang diberikan ke embedder |
 | `--no-slang-norm` | Nonaktifkan normalisasi slang kamus-alay |
+| `--keep-langs id,ms,...` | Kode bahasa (ISO 639) yang dipertahankan; baris yang **diyakini** berbahasa lain dibuang. Default `id,ms,jv,su,min,ban,ace` (Indonesia + Melayu + bahasa daerah). Pakai `id` saja untuk penyaringan ketat |
+| `--no-lang-filter` | Nonaktifkan deteksi & penyaringan bahasa (proses semua bahasa) |
+| `--lang-min-conf 0.5` | Hanya buang baris asing bila kepercayaan deteksi ≥ nilai ini; baris berkeyakinan rendah dipertahankan agar teks Indonesia tidak salah buang |
+| `--lang-backend` | `fasttext` (default, cepat) atau `langdetect` (Python murni); otomatis jatuh ke yang tersedia |
+| `--lang-model PATH` | Path model fastText `lid.176` (.ftz/.bin); diunduh otomatis ke `~/.cache` bila kosong |
 
 ## Keluaran (`results/`)
 
-- `assignments.csv` — setiap baris asli beserta `clean_text`, `topic`, `topic_label`.
+- `assignments.csv` — setiap baris yang **lolos saring bahasa**, beserta
+  `clean_text`, `lang`, `lang_conf`, `topic`, `topic_label`.
   `topic = -1` → outlier HDBSCAN; `topic = -2` → disaring sebagai non-informatif.
+- `dropped_languages.csv` — bahasa yang dibuang beserta jumlah baris dan
+  persentasenya (audit penyaringan bahasa).
 - `topics_summary.csv` — per topik: ukuran, 10 kata kunci c-TF-IDF teratas, 3 dokumen perwakilan.
-- `metrics.json` — % outlier, silhouette, porsi klaster terbesar, parameter yang dipakai.
+- `metrics.json` — baris dibuang per bahasa, distribusi bahasa yang dipertahankan,
+  % outlier, silhouette, porsi klaster terbesar, parameter yang dipakai.
 - `topic_map.html`, `topic_barchart.html` — inspeksi interaktif.
 - `bertopic_model/` — model tersimpan; muat ulang dengan `BERTopic.load()` untuk
   melabeli data baru lewat `topic_model.transform(new_docs, new_embeddings)`.
@@ -173,9 +183,20 @@ capstone:
   (~4,3rb entri, pemetaan mayoritas yang menang). Ia memperbaiki jauh lebih
   banyak daripada yang dirusak pada domain ini, tetapi periksa `clean_text` lebih
   awal. Nonaktifkan dengan `--no-slang-norm` lalu bandingkan jika mencurigakan.
-- **Code-mixing**: postingan campuran Indonesia-Inggris umum dijumpai. Model
-  multibahasa default menanganinya; model murni-Indonesia mungkin tidak.
-  Bandingkan.
+- **Penyaringan bahasa (deteksi rapuh pada teks pendek)**: korpus media sosial
+  sering bercampur bahasa (Inggris, Hindi, Spanyol, dst.). Pipeline mendeteksi
+  bahasa tiap baris (fastText `lid.176`, fallback `langdetect`) lalu **membuang**
+  baris yang *diyakini* berbahasa asing — lihat `dropped_languages.csv` untuk
+  audit. Deteksi pada teks pendek + tidak baku rapuh dan kerap mengira bahasa
+  Indonesia informal sebagai **Melayu (`ms`)** atau bahasa daerah, karena itu
+  keep-set bawaan menyertakan `ms,jv,su,min,ban,ace` agar teks Indonesia asli
+  tidak ikut terbuang. Hanya baris dengan kepercayaan ≥ `--lang-min-conf` (0.5)
+  yang dibuang, jadi baris pendek/ambigu tetap aman. Untuk penyaringan ketat
+  pakai `--keep-langs id`; untuk menonaktifkan sama sekali pakai `--no-lang-filter`.
+- **Code-mixing**: postingan campuran Indonesia-Inggris umum dijumpai dan biasanya
+  terdeteksi sebagai `id` (atau berkeyakinan rendah) sehingga tetap dipertahankan.
+  Model multibahasa default menangani campuran ini; model murni-Indonesia mungkin
+  tidak. Bandingkan.
 - **Label topik adalah kata kunci, bukan nama.** c-TF-IDF memberi
   `0_bbm_harga_naik_subsidi`; untuk laporan, tulis label yang layak secara manual
   (atau beri prompt ke LLM dengan kata kunci + dokumen perwakilan — tetapi
