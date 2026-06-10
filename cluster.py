@@ -293,6 +293,36 @@ def assign_by_centroid(
 
 
 # ---------------------------------------------------------------------------
+# Penamaan topik berbasis sentroid
+# ---------------------------------------------------------------------------
+
+def get_top_docs_by_centroid(
+    unique_texts: list[str],
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    top_n: int = 5,
+) -> dict[int, list[str]]:
+    """
+    Untuk setiap topik, kembalikan top_n teks dengan kemiripan kosinus
+    tertinggi ke sentroid topik di ruang embedding.
+    """
+    topic_ids = sorted(set(labels.tolist()) - {-1, -2})
+    emb_f32 = np.asarray(embeddings, dtype=np.float32)
+    result: dict[int, list[str]] = {}
+    for tid in topic_ids:
+        mask = labels == tid
+        if not mask.any():
+            continue
+        centroid = emb_f32[mask].mean(axis=0)
+        centroid /= np.linalg.norm(centroid) + 1e-12
+        sims = emb_f32[mask] @ centroid
+        global_idx = np.where(mask)[0]
+        top_local = np.argsort(sims)[::-1][:top_n]
+        result[tid] = [unique_texts[global_idx[i]] for i in top_local]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Evaluasi / ekspor
 # ---------------------------------------------------------------------------
 
@@ -317,7 +347,13 @@ def compute_silhouette(topic_model, topics: list[int], max_sample: int = 20000) 
         return None
 
 
-def export_results(out_dir: Path, df: pd.DataFrame, topic_model, metrics: dict) -> None:
+def export_results(
+    out_dir: Path,
+    df: pd.DataFrame,
+    topic_model,
+    metrics: dict,
+    centroid_docs_map: dict[int, list[str]] | None = None,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df.to_csv(out_dir / "assignments.csv", index=False)
@@ -334,6 +370,10 @@ def export_results(out_dir: Path, df: pd.DataFrame, topic_model, metrics: dict) 
         examples.append(" ||| ".join((reps or [])[:3]))
     info["Keywords"] = keywords
     info["Examples"] = examples
+    if centroid_docs_map:
+        info["Top5CentroidDocs"] = info["Topic"].map(
+            lambda tid: " ||| ".join(centroid_docs_map.get(tid, []))
+        )
     info.to_csv(out_dir / "topics_summary.csv", index=False)
 
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
@@ -475,6 +515,9 @@ def main() -> None:
     label_map = dict(zip(unique_texts, all_labels.tolist()))
     info = topic_model.get_topic_info()
     name_map = dict(zip(info["Topic"], info["Name"]))
+
+    centroid_docs_map = get_top_docs_by_centroid(unique_texts, embeddings, all_labels)
+
     df["topic"] = df["clean_text"].map(label_map)
     df["topic"] = df["topic"].where(df["informative"], other=-2)  # -2 = sampah
     df["topic"] = df["topic"].fillna(-2).astype(int)
@@ -504,7 +547,7 @@ def main() -> None:
         "seed": args.seed,
     }
     print(json.dumps(metrics, indent=2))
-    export_results(out_dir, df.drop(columns=["informative"]), topic_model, metrics)
+    export_results(out_dir, df.drop(columns=["informative"]), topic_model, metrics, centroid_docs_map)
 
 
 if __name__ == "__main__":
