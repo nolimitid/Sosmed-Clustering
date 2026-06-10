@@ -332,26 +332,50 @@ def build_topic_graph(
     embeddings: np.ndarray,
     labels: np.ndarray,
     threshold: float = 0.25,
-) -> tuple[list[int], dict[tuple[int, int], float]]:
+    soft_threshold: float = 0.40,
+) -> tuple[list[int], dict[tuple[int, int], dict]]:
     """
-    Bangun graph topik-ke-topik berdasarkan kemiripan kosinus antar sentroid.
-    Hanya ~50 node meski data puluhan juta — scalable by design.
+    Bangun graph topik berdasarkan CO-OCCURRENCE: berapa banyak dokumen yang
+    secara semantik dekat dengan KEDUA sentroid topik A dan B sekaligus
+    (similarity >= soft_threshold ke keduanya). Edge hanya dibuat bila
+    cooccurrence_rate >= threshold.
+
+    Edge menyimpan dua metrik:
+      - cooccurrence_rate : fraksi dokumen yang menjembatani dua topik
+      - centroid_similarity: kemiripan langsung antar sentroid (sebagai info tambahan)
     """
     topic_ids = sorted(set(labels.tolist()) - {-1, -2})
     if len(topic_ids) < 2:
         return topic_ids, {}
+
     emb_f32 = np.asarray(embeddings, dtype=np.float32)
     centroids = np.stack([emb_f32[labels == t].mean(axis=0) for t in topic_ids])
     centroids /= np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-12
-    sim = centroids @ centroids.T
-    np.fill_diagonal(sim, 0)
-    edges: dict[tuple[int, int], float] = {}
+
+    # similarity setiap dokumen ke semua sentroid: shape (n_docs, n_topics)
+    doc_sim = emb_f32 @ centroids.T          # (n_docs, n_topics)
+    above = doc_sim >= soft_threshold        # bool mask
+    n_docs = len(emb_f32)
+
+    # centroid-to-centroid similarity (untuk info)
+    centroid_sim = centroids @ centroids.T
+    np.fill_diagonal(centroid_sim, 0)
+
+    edges: dict[tuple[int, int], dict] = {}
     for i, ti in enumerate(topic_ids):
         for j, tj in enumerate(topic_ids):
-            if i < j and float(sim[i, j]) >= threshold:
-                edges[(ti, tj)] = float(sim[i, j])
+            if i >= j:
+                continue
+            cooc = int(np.logical_and(above[:, i], above[:, j]).sum())
+            rate = cooc / max(n_docs, 1)
+            if rate >= threshold:
+                edges[(ti, tj)] = {
+                    "cooccurrence_count": cooc,
+                    "cooccurrence_rate": round(rate, 6),
+                    "centroid_similarity": round(float(centroid_sim[i, j]), 4),
+                }
     print(f"[graph] {len(topic_ids)} topik, {len(edges)} edge "
-          f"(similarity threshold={threshold})")
+          f"(co-occurrence threshold={threshold}, soft_threshold={soft_threshold})")
     return topic_ids, edges
 
 
@@ -374,7 +398,7 @@ def detect_meta_topics(
     g = ig.Graph()
     g.add_vertices(len(topic_ids))
     g.add_edges([(idx_of[ti], idx_of[tj]) for ti, tj in edges])
-    g.es["weight"] = list(edges.values())
+    g.es["weight"] = [v["cooccurrence_rate"] for v in edges.values()]
 
     partition = leidenalg.find_partition(
         g,
@@ -410,8 +434,8 @@ def visualize_topic_graph(
     name_map = dict(zip(topic_info["Topic"], topic_info["Name"]))
     for tid in topic_ids:
         G.add_node(tid)
-    for (ti, tj), w in edges.items():
-        G.add_edge(ti, tj, weight=w)
+    for (ti, tj), data in edges.items():
+        G.add_edge(ti, tj, **data)
 
     pos = nx.spring_layout(G, seed=42, weight="weight",
                            k=2.5 / max(len(topic_ids) ** 0.5, 1))
@@ -420,12 +444,14 @@ def visualize_topic_graph(
     for ti, tj, data in G.edges(data=True):
         x0, y0 = pos[ti]
         x1, y1 = pos[tj]
+        rate = data.get("cooccurrence_rate", 0.01)
         edge_traces.append(go.Scatter(
             x=[x0, x1, None], y=[y0, y1, None],
             mode="lines",
-            line=dict(width=float(data.get("weight", 0.1)) * 4,
-                      color="rgba(150,150,150,0.4)"),
-            hoverinfo="none", showlegend=False,
+            line=dict(width=max(0.5, rate * 200), color="rgba(150,150,150,0.4)"),
+            hovertext=f"T{ti}↔T{tj} | co-occurrence: {rate:.2%} | "
+                      f"centroid sim: {data.get('centroid_similarity', 0):.2f}",
+            hoverinfo="text", showlegend=False,
         ))
 
     xs = [pos[t][0] for t in topic_ids]
@@ -528,8 +554,8 @@ def export_results(
 
     if graph_edges:
         pd.DataFrame(
-            [{"topic_a": ti, "topic_b": tj, "similarity": w}
-             for (ti, tj), w in graph_edges.items()]
+            [{"topic_a": ti, "topic_b": tj, **data}
+             for (ti, tj), data in graph_edges.items()]
         ).to_csv(out_dir / "topic_graph_edges.csv", index=False)
 
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
