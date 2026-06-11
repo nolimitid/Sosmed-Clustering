@@ -298,6 +298,21 @@ def assign_by_centroid(
 # Penamaan topik berbasis sentroid
 # ---------------------------------------------------------------------------
 
+def compute_centroids(
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+) -> tuple[np.ndarray, list[int]]:
+    """Return L2-normalized per-topic centroids and matching topic_ids list."""
+    topic_ids = sorted(set(labels.tolist()) - {-1, -2})
+    if not topic_ids:
+        dim = embeddings.shape[1] if embeddings.ndim > 1 else 1
+        return np.empty((0, dim), dtype=np.float32), []
+    emb_f32 = np.asarray(embeddings, dtype=np.float32)
+    centroids = np.stack([emb_f32[labels == t].mean(axis=0) for t in topic_ids])
+    centroids /= np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-12
+    return centroids.astype(np.float32), topic_ids
+
+
 def get_top_docs_by_centroid(
     unique_texts: list[str],
     embeddings: np.ndarray,
@@ -527,8 +542,14 @@ def export_results(
     centroid_docs_map: dict[int, list[str]] | None = None,
     meta_map: dict[int, int] | None = None,
     graph_edges: dict[tuple[int, int], float] | None = None,
+    centroids: np.ndarray | None = None,
+    centroid_topic_ids: list[int] | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if centroids is not None and centroid_topic_ids is not None:
+        np.save(out_dir / "centroids.npy", centroids)
+        (out_dir / "centroid_topic_ids.json").write_text(json.dumps(centroid_topic_ids))
 
     df.to_csv(out_dir / "assignments.csv", index=False)
 
@@ -642,6 +663,9 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--device", default=None, help="cuda / cpu (otomatis jika tidak diisi)")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--done-file", default=None,
+                   help="tulis 'ok' ke path ini setelah ekspor selesai "
+                        "(untuk checkpoint pipeline.py per chunk)")
     args = p.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -770,6 +794,7 @@ def main() -> None:
     name_map = dict(zip(info["Topic"], info["Name"]))
 
     centroid_docs_map = get_top_docs_by_centroid(unique_texts, embeddings, all_labels)
+    chunk_centroids, chunk_topic_ids = compute_centroids(embeddings, all_labels)
 
     # 7b. Graph analisis & meta-topik ------------------------------------------
     topic_ids_graph, graph_edges = build_topic_graph(
@@ -819,7 +844,12 @@ def main() -> None:
     }
     print(json.dumps(metrics, indent=2))
     export_results(out_dir, df.drop(columns=["informative"]), topic_model, metrics,
-                   centroid_docs_map, meta_map, graph_edges)
+                   centroid_docs_map, meta_map, graph_edges,
+                   centroids=chunk_centroids, centroid_topic_ids=chunk_topic_ids)
+
+    if args.done_file:
+        Path(args.done_file).write_text("ok")
+        print(f"[done] checkpoint ditulis ke {args.done_file}")
 
 
 if __name__ == "__main__":
