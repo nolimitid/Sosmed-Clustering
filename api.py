@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -424,6 +425,19 @@ def _get_job(job_id: str) -> Job:
     return job
 
 
+def _download_name(job: Job, rel_path: Path) -> str:
+    """Nama berkas unduhan yang unik per job.
+
+    Prefiks dengan project_id (untuk job pipeline) atau id job, lalu ratakan
+    subdirektori — sehingga `cluster_chunk_00001/metrics.json` dari project A tidak
+    bertabrakan dengan berkas bernama sama dari project lain di folder Unduhan.
+    Contoh: `<project_id>__cluster_chunk_00001_metrics.json`.
+    """
+    prefix = job.config.get("project_id") or job.id
+    prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", str(prefix)).strip("_") or job.id
+    return f"{prefix}__" + "_".join(rel_path.parts)
+
+
 @app.get("/jobs/{job_id}", dependencies=AUTH)
 def get_job(job_id: str) -> dict:
     return _get_job(job_id).snapshot()
@@ -453,7 +467,11 @@ def list_files(job_id: str) -> dict:
             rel = p.relative_to(base)
             if "cache" in rel.parts:        # lewati cache embedding (bisa beberapa GB)
                 continue
-            files.append({"name": str(rel), "bytes": p.stat().st_size})
+            files.append({
+                "name": str(rel),
+                "bytes": p.stat().st_size,
+                "download_name": _download_name(job, rel),
+            })
     return {"job_id": job_id, "output_dir": job.output_dir, "files": files}
 
 
@@ -466,7 +484,7 @@ def download_file(job_id: str, filename: str) -> FileResponse:
         raise HTTPException(status_code=400, detail="path berkas tidak valid")
     if not target.is_file():
         raise HTTPException(status_code=404, detail=f"berkas tidak ditemukan: {filename}")
-    return FileResponse(target, filename=target.name)
+    return FileResponse(target, filename=_download_name(job, target.relative_to(base)))
 
 
 @app.post("/jobs/{job_id}/cancel", dependencies=AUTH)

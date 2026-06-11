@@ -495,7 +495,7 @@ async function openFiles(id) {
       <span><span class="fname">${f.name}</span><span class="fsize">${fmtBytes(f.bytes)}</span></span>
       <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
         ${isHtml ? `<a href="/jobs/${id}/files/${f.name}" target="_blank" class="btn btn-sm btn-blue">Buka</a>` : ''}
-        <a href="/jobs/${id}/files/${f.name}" download="${f.name.split('/').pop()}" class="btn btn-sm btn-green">Unduh</a>
+        <a href="/jobs/${id}/files/${f.name}" download="${f.download_name || f.name.split('/').pop()}" class="btn btn-sm btn-green">Unduh</a>
       </div>
     </div>`;
   }
