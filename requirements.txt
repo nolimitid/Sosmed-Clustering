@@ -13,3 +13,8 @@ langdetect>=1.0.9      # deteksi bahasa (fallback Python murni, selalu terpasang
 # Backend deteksi bahasa yang disarankan untuk jutaan baris (jauh lebih cepat
 # daripada langdetect; roda prabangun, tanpa kompilator C). Opsional:
 #   pip install fasttext-wheel
+
+# Server API (api.py) — jalankan pipeline dari jarak jauh lewat HTTP/SSH/Termius
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9   # unggah berkas (Form/File) di FastAPI

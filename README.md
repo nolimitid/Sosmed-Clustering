@@ -25,6 +25,59 @@ GPU sangat disarankan di atas ~50rb dokumen (Google Colab T4 sudah cukup).
 Embedding di-cache di `results/cache/`, jadi menjalankan ulang dengan parameter
 klasterisasi yang berbeda menjadi cepat.
 
+## Menjalankan lewat API (FastAPI) — untuk Termius/SSH
+
+`api.py` membungkus pipeline menjadi server HTTP sehingga Anda dapat memicu run
+dari ponsel/jarak jauh (mis. lewat Termius) tanpa harus menjaga koneksi tetap
+terbuka selama proses berjam-jam. Tiap permintaan dijalankan sebagai **job latar
+belakang** (subprocess `cluster.py`), satu per satu secara bawaan.
+
+```bash
+pip install -r requirements.txt          # sudah termasuk fastapi + uvicorn
+uvicorn api:app --host 0.0.0.0 --port 8000   # atau:  python api.py
+```
+
+Dokumentasi interaktif tersedia di `http://<host>:8000/docs`.
+
+| Endpoint | Fungsinya |
+|---|---|
+| `POST /jobs` | Mulai job. Sertakan `text_col` + **salah satu** dari `file` (unggah) atau `input_path` (berkas yang sudah ada di server). Parameter lain (`model`, `sample`, `fit_sample`, `keep_langs`, dst.) opsional dan sama dengan flag CLI. Mengembalikan `job_id`. |
+| `GET /jobs` | Daftar semua job. |
+| `GET /jobs/{id}` | Status job (`queued`/`running`/`done`/`failed`/`cancelled`) + `metrics` bila selesai. |
+| `GET /jobs/{id}/log?tail=200` | Log proses (sama dengan keluaran CLI). |
+| `GET /jobs/{id}/files` | Daftar berkas keluaran (cache embedding disembunyikan). |
+| `GET /jobs/{id}/files/{nama}` | Unduh berkas keluaran (mis. `assignments.csv`). |
+| `POST /jobs/{id}/cancel` | Hentikan job yang sedang berjalan/antre. |
+| `DELETE /jobs/{id}` | Hapus job beserta berkasnya. |
+
+Contoh dari Termius (curl):
+
+```bash
+# unggah berkas kecil
+curl -F text_col=text -F file=@posts.csv http://localhost:8000/jobs
+
+# atau pakai berkas besar yang sudah ada di server (disarankan untuk parquet jutaan baris)
+curl -F text_col=text -F input_path=/data/posts.parquet -F sample=200000 \
+     http://localhost:8000/jobs
+
+JOB=ab12cd34ef56
+curl http://localhost:8000/jobs/$JOB                       # status + metrik
+curl "http://localhost:8000/jobs/$JOB/log?tail=200"        # progres
+curl -OJ http://localhost:8000/jobs/$JOB/files/assignments.csv
+```
+
+**Variabel lingkungan**: `API_HOST`/`API_PORT` (alamat bind), `API_MAX_WORKERS`
+(jumlah job paralel; bawaan 1 karena tiap job berat di RAM/GPU), `API_JOBS_DIR`
+(lokasi penyimpanan job; bawaan `api_jobs/`), `API_TOKEN` (bila diisi, semua
+endpoint job mewajibkan header `X-API-Token: <token>` atau `Authorization: Bearer
+<token>`).
+
+> ⚠️ **Keamanan**: server tidak punya autentikasi bawaan. `input_path` dapat
+> membaca berkas apa pun yang bisa diakses proses server. Bila mengikat ke
+> `0.0.0.0`, lindungi dengan firewall / SSH tunnel, atau set `API_TOKEN`. Untuk
+> akses lewat Termius, paling aman: jalankan server di `127.0.0.1` lalu pakai
+> port-forward SSH (`ssh -L 8000:localhost:8000 user@host`).
+
 ### Flag yang berguna
 
 | Flag | Fungsinya |

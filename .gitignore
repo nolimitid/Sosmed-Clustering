@@ -4,6 +4,9 @@ report_raw_posts_*.json
 # Pipeline outputs (embedding cache/memmap can be several GB)
 results/
 
+# API job dirs (uploaded inputs, per-job outputs, logs)
+api_jobs/
+
 # Python bytecode
 __pycache__/
 *.pyc
