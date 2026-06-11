@@ -112,6 +112,7 @@ def run_fetch(
     output_dir: Path,
     chunk_size: int,
     page_size: int,
+    max_docs: int = 0,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     cursor_path = output_dir / "cursor.json"
@@ -133,6 +134,9 @@ def run_fetch(
             print(f"  {idx}: error - {e}")
     print(f"[fetch] total: {total_docs:,} docs | chunk_size={chunk_size:,}")
 
+    if max_docs > 0:
+        total_docs = min(total_docs, max_docs)
+        print(f"[fetch] batas max_docs={max_docs:,} — akan berhenti setelah {total_docs:,} dokumen")
     if total_fetched >= total_docs and total_docs > 0:
         print("[fetch] semua data sudah diambil sebelumnya.")
         return
@@ -150,10 +154,13 @@ def run_fetch(
                 time.sleep(10)
                 continue
 
-            if not hits:
+            if not hits or (max_docs > 0 and total_fetched >= max_docs):
                 search_after = None  # reset untuk index berikutnya
                 break
 
+            if max_docs > 0:
+                remaining = max_docs - total_fetched
+                hits = hits[:remaining]
             buffer.extend(hits)
             search_after = next_after
             total_fetched += len(hits)
@@ -213,6 +220,9 @@ def main() -> None:
                    help="jumlah dokumen per file parquet (default: 100000)")
     p.add_argument("--page-size", type=int, default=5_000,
                    help="ukuran batch per request ES (default: 5000)")
+    p.add_argument("--max-docs", type=int, default=0,
+                   help="batas maksimal dokumen yang diambil dari ES (0 = semua; "
+                        "berguna untuk testing, misal --max-docs 100000)")
     args = p.parse_args()
 
     run_fetch(
@@ -221,6 +231,7 @@ def main() -> None:
         output_dir=Path(args.output_dir),
         chunk_size=args.chunk_size,
         page_size=args.page_size,
+        max_docs=args.max_docs,
     )
 
 

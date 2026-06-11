@@ -9,11 +9,25 @@ non-Indonesia) → saring sampah → deduplikasi → sentence embedding → UMAP
 HDBSCAN → kata kunci c-TF-IDF (BERTopic) → gabungkan ke rentang target →
 ekspor.**
 
+## Struktur file
+
+| File | Fungsi |
+|---|---|
+| `cluster.py` | Pipeline clustering satu batch (input file → topics + assignments) |
+| `es_fetch.py` | Fetch data dari Elasticsearch ke file parquet per chunk |
+| `merge.py` | Merge centroid dari semua chunk → global topics |
+| `pipeline.py` | Orchestrator end-to-end: fetch → cluster per chunk → merge |
+| `api.py` | Server FastAPI — jalankan pipeline dari jarak jauh lewat HTTP |
+| `static/index.html` | UI web (buka di browser via `http://<host>:8880/ui`) |
+| `preprocess.py` | Fungsi cleaning teks (clean_text, normalize_slang, is_informative) |
+| `language_id.py` | Deteksi bahasa (fastText / langdetect) |
+
 ## Mulai cepat
 
 ```bash
 pip install -r requirements.txt
 
+# Test satu file CSV / parquet langsung
 python cluster.py \
     --input posts.csv \
     --text-col text \
@@ -25,52 +39,89 @@ GPU sangat disarankan di atas ~50rb dokumen (Google Colab T4 sudah cukup).
 Embedding di-cache di `results/cache/`, jadi menjalankan ulang dengan parameter
 klasterisasi yang berbeda menjadi cepat.
 
-## Menjalankan lewat API (FastAPI) — untuk Termius/SSH
+## Pipeline end-to-end dari Elasticsearch (untuk data skala besar)
 
-`api.py` membungkus pipeline menjadi server HTTP sehingga Anda dapat memicu run
-dari ponsel/jarak jauh (mis. lewat Termius) tanpa harus menjaga koneksi tetap
-terbuka selama proses berjam-jam. Tiap permintaan dijalankan sebagai **job latar
-belakang** (subprocess `cluster.py`), satu per satu secara bawaan.
+Pipeline berjalan dalam 3 tahap berurutan dengan **checkpoint** — setiap tahap
+yang sudah selesai tidak akan diulang bila pipeline di-restart:
 
-```bash
-pip install -r requirements.txt          # sudah termasuk fastapi + uvicorn
-uvicorn api:app --host 0.0.0.0 --port 8000   # atau:  python api.py
+```
+es_fetch.py  →  cluster.py (per chunk)  →  merge.py
+(fetch.done)     (cluster.done per chunk)   (merge.done)
 ```
 
-Dokumentasi interaktif tersedia di `http://<host>:8000/docs`.
+```bash
+# Jalankan pipeline lengkap (fetch → cluster → merge)
+python pipeline.py \
+    --project-id <uuid-project> \
+    --output-dir data/project1 \
+    --max-docs 100000 \       # 0 = semua data project
+    --chunk-size 100000 \
+    --target-min 20 --target-max 50 \
+    --assign-outliers
+
+# Lanjutkan setelah crash (fetch sudah selesai):
+python pipeline.py --project-id <uuid> --output-dir data/project1 --skip-fetch
+
+# Hanya jalankan merge dari chunk yang sudah di-cluster:
+python pipeline.py --project-id <uuid> --output-dir data/project1 \
+    --skip-fetch --skip-cluster
+```
+
+**Output pipeline** (di `--output-dir`):
+
+```
+data/project1/
+├── fetch.done
+├── chunks/               ← parquet dari ES (chunk_00000.parquet, dst.)
+├── cluster_chunk_00000/  ← hasil cluster per chunk
+│   ├── cluster.done
+│   ├── centroids.npy     ← dipakai saat merge
+│   ├── assignments.csv
+│   └── topics_summary.csv
+└── merged/               ← OUTPUT UTAMA
+    ├── merge.done
+    ├── global_topics_summary.csv  ← 20–50 topik global + keyword
+    ├── global_topic_mapping.json
+    ├── topic_graph.html           ← visualisasi interaktif
+    └── topic_graph_edges.csv
+```
+
+## Menjalankan lewat API + UI Web — untuk akses jarak jauh
+
+`api.py` membungkus pipeline menjadi server HTTP dengan **UI web** sehingga Anda
+dapat memicu run dari browser/ponsel tanpa perlu akses terminal.
+
+```bash
+pip install -r requirements.txt
+uvicorn api:app --host 0.0.0.0 --port 8880   # sesuaikan dengan run.sh
+```
+
+**Buka UI di browser**: `http://<host>:8880/ui`
+
+UI memungkinkan:
+- Input Project ID + target data + rentang topik → klik **Mulai Pipeline**
+- Pantau status job secara live (auto-refresh setiap 6 detik)
+- Lihat log berjalan langsung dari browser
+- Unduh hasil (`global_topics_summary.csv`, `topic_graph.html`, dll.)
 
 | Endpoint | Fungsinya |
 |---|---|
-| `POST /jobs` | Mulai job. Sertakan `text_col` + **salah satu** dari `file` (unggah) atau `input_path` (berkas yang sudah ada di server). Parameter lain (`model`, `sample`, `fit_sample`, `keep_langs`, dst.) opsional dan sama dengan flag CLI. Mengembalikan `job_id`. |
-| `GET /jobs` | Daftar semua job. |
-| `GET /jobs/{id}` | Status job (`queued`/`running`/`done`/`failed`/`cancelled`) + `metrics` bila selesai. |
-| `GET /jobs/{id}/log?tail=200` | Log proses (sama dengan keluaran CLI). |
-| `GET /jobs/{id}/files` | Daftar berkas keluaran (cache embedding disembunyikan). |
-| `GET /jobs/{id}/files/{nama}` | Unduh berkas keluaran (mis. `assignments.csv`). |
-| `POST /jobs/{id}/cancel` | Hentikan job yang sedang berjalan/antre. |
-| `DELETE /jobs/{id}` | Hapus job beserta berkasnya. |
-
-Contoh dari Termius (curl):
-
-```bash
-# unggah berkas kecil
-curl -F text_col=text -F file=@posts.csv http://localhost:8000/jobs
-
-# atau pakai berkas besar yang sudah ada di server (disarankan untuk parquet jutaan baris)
-curl -F text_col=text -F input_path=/data/posts.parquet -F sample=200000 \
-     http://localhost:8000/jobs
-
-JOB=ab12cd34ef56
-curl http://localhost:8000/jobs/$JOB                       # status + metrik
-curl "http://localhost:8000/jobs/$JOB/log?tail=200"        # progres
-curl -OJ http://localhost:8000/jobs/$JOB/files/assignments.csv
-```
+| `GET /ui` | UI web (buka di browser) |
+| `POST /pipeline-jobs` | Mulai pipeline ES → cluster → merge. Parameter: `project_id`, `max_docs`, `chunk_size`, `target_min`, `target_max`, dll. |
+| `POST /jobs` | Mulai job cluster satu file (upload atau path di server). |
+| `GET /jobs` | Daftar semua job (pipeline maupun cluster). |
+| `GET /jobs/{id}` | Status + metrik. |
+| `GET /jobs/{id}/log?tail=200` | Log proses. |
+| `GET /jobs/{id}/files` | Daftar berkas keluaran. |
+| `GET /jobs/{id}/files/{nama}` | Unduh berkas (mendukung subdirektori, misal `merged/global_topics_summary.csv`). |
+| `POST /jobs/{id}/cancel` | Hentikan job. |
+| `DELETE /jobs/{id}` | Hapus job + file. |
 
 **Variabel lingkungan**: `API_HOST`/`API_PORT` (alamat bind), `API_MAX_WORKERS`
-(jumlah job paralel; bawaan 1 karena tiap job berat di RAM/GPU), `API_JOBS_DIR`
-(lokasi penyimpanan job; bawaan `api_jobs/`), `API_TOKEN` (bila diisi, semua
-endpoint job mewajibkan header `X-API-Token: <token>` atau `Authorization: Bearer
-<token>`).
+(job paralel; bawaan 1), `API_JOBS_DIR` (lokasi penyimpanan job; bawaan
+`api_jobs/`), `API_TOKEN` (bila diisi, semua endpoint mewajibkan header
+`X-API-Token: <token>` atau `Authorization: Bearer <token>` — dapat diisi
+juga di kolom Token pada UI).
 
 > ⚠️ **Keamanan**: server tidak punya autentikasi bawaan. `input_path` dapat
 > membaca berkas apa pun yang bisa diakses proses server. Bila mengikat ke

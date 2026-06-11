@@ -7,6 +7,22 @@ results/
 # API job dirs (uploaded inputs, per-job outputs, logs)
 api_jobs/
 
+# Virtual environment — jangan pernah di-commit
+venv/
+.venv/
+env/
+
+# Data pipeline output (bisa puluhan GB)
+data/
+results*/
+
 # Python bytecode
 __pycache__/
 *.pyc
+*.pyo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -58,6 +58,10 @@ def main() -> None:
                    help="jumlah dokumen per file parquet (default: 100000)")
     p.add_argument("--page-size", type=int, default=5_000,
                    help="ukuran batch per request ES (default: 5000)")
+    p.add_argument("--max-docs", type=int, default=0,
+                   help="batas maksimal total dokumen yang diambil dari ES "
+                        "(0 = semua data project; berguna untuk testing, "
+                        "misal --max-docs 100000)")
 
     # ---- Cluster per chunk ----
     p.add_argument("--model", default="LazarusNLP/all-indo-e5-small-v4")
@@ -113,6 +117,8 @@ def main() -> None:
                 "--chunk-size", str(args.chunk_size),
                 "--page-size", str(args.page_size),
             ]
+            if args.max_docs > 0:
+                cmd += ["--max-docs", str(args.max_docs)]
             if args.indices:
                 cmd += ["--indices"] + args.indices
 

@@ -52,10 +52,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 HERE = Path(__file__).resolve().parent
-CLUSTER_SCRIPT = HERE / "cluster.py"
+CLUSTER_SCRIPT  = HERE / "cluster.py"
+PIPELINE_SCRIPT = HERE / "pipeline.py"
+STATIC_DIR      = HERE / "static"
+STATIC_DIR.mkdir(exist_ok=True)
 JOBS_ROOT = Path(os.environ.get("API_JOBS_DIR", HERE / "api_jobs"))
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -97,6 +100,32 @@ PARAM_SPEC = [
     ("device", "--device", "optional"),
     ("seed", "--seed", "value"),
 ]
+
+
+def build_pipeline_command(config: dict, output_dir: Path) -> list[str]:
+    """Susun perintah `python pipeline.py ...` dari konfigurasi job pipeline."""
+    cmd = [
+        sys.executable, "-u", str(PIPELINE_SCRIPT),
+        "--project-id", config["project_id"],
+        "--output-dir", str(output_dir),
+        "--chunk-size", str(config.get("chunk_size", 100_000)),
+        "--target-min", str(config.get("target_min", 20)),
+        "--target-max", str(config.get("target_max", 50)),
+        "--model",      config.get("model", "LazarusNLP/all-indo-e5-small-v4"),
+        "--batch-size", str(config.get("batch_size", 128)),
+        "--keep-langs", config.get("keep_langs", "id,ms,jv,su,min,ban,ace"),
+        "--graph-threshold", str(config.get("graph_threshold", 0.25)),
+        "--seed",        str(config.get("seed", 42)),
+    ]
+    if config.get("max_docs", 0) > 0:
+        cmd += ["--max-docs", str(config["max_docs"])]
+    if config.get("device"):
+        cmd += ["--device", config["device"]]
+    if config.get("no_lang_filter"):
+        cmd.append("--no-lang-filter")
+    if config.get("assign_outliers"):
+        cmd.append("--assign-outliers")
+    return cmd
 
 
 def build_command(config: dict, input_path: Path, output_dir: Path) -> list[str]:
@@ -182,7 +211,11 @@ def _run_job(job_id: str) -> None:
     job.started_at = time.time()
     _save_status(job)
 
-    cmd = build_command(job.config, Path(job.input_path), Path(job.output_dir))
+    if "cmd_args" in job.config:
+        cmd = job.config["cmd_args"]
+    else:
+        cmd = build_command(job.config, Path(job.input_path), Path(job.output_dir))
+    script_name = Path(cmd[2]).name if len(cmd) > 2 else "script"
     try:
         with open(job.log_path, "a", buffering=1, encoding="utf-8") as logf:
             logf.write("$ " + " ".join(cmd) + "\n\n")
@@ -201,7 +234,7 @@ def _run_job(job_id: str) -> None:
             job.metrics = _read_metrics(Path(job.output_dir))
         else:
             job.status = "failed"
-            job.error = (f"cluster.py keluar dengan kode {returncode} — "
+            job.error = (f"{script_name} keluar dengan kode {returncode} — "
                          f"lihat log untuk detail")
     except Exception as exc:
         job.status = "failed"
@@ -462,6 +495,77 @@ def delete_job(job_id: str) -> dict:
     if job_dir.exists() and JOBS_ROOT in job_dir.resolve().parents:
         shutil.rmtree(job_dir, ignore_errors=True)
     return {"deleted": job_id}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline jobs (es_fetch → cluster per chunk → merge)
+# ---------------------------------------------------------------------------
+
+@app.post("/pipeline-jobs", dependencies=AUTH)
+async def create_pipeline_job(
+    project_id: str = Form(..., description="UUID project di Elasticsearch"),
+    output_dir: str | None = Form(None, description="path output di server; kosong = otomatis"),
+    max_docs: int = Form(0, description="batas total dokumen dari ES (0 = semua)"),
+    chunk_size: int = Form(100_000, description="dokumen per file parquet saat fetch"),
+    target_min: int = Form(20),
+    target_max: int = Form(50),
+    model: str = Form("LazarusNLP/all-indo-e5-small-v4"),
+    no_lang_filter: bool = Form(False),
+    keep_langs: str = Form("id,ms,jv,su,min,ban,ace"),
+    assign_outliers: bool = Form(True),
+    graph_threshold: float = Form(0.25),
+    batch_size: int = Form(128),
+    device: str | None = Form(None),
+    seed: int = Form(42),
+) -> dict:
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = JOBS_ROOT / job_id
+    out_dir = Path(output_dir) if output_dir else (job_dir / "output")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    config = {
+        "job_type": "pipeline",
+        "project_id": project_id,
+        "max_docs": max_docs,
+        "chunk_size": chunk_size,
+        "target_min": target_min,
+        "target_max": target_max,
+        "model": model,
+        "no_lang_filter": no_lang_filter,
+        "keep_langs": keep_langs,
+        "assign_outliers": assign_outliers,
+        "graph_threshold": graph_threshold,
+        "batch_size": batch_size,
+        "device": device,
+        "seed": seed,
+    }
+    config["cmd_args"] = build_pipeline_command(config, out_dir)
+
+    log_path = job_dir / "job.log"
+    log_path.touch()
+    job = Job(job_id, config, out_dir, out_dir, log_path)
+    with _lock:
+        JOBS[job_id] = job
+    _save_status(job)
+    executor.submit(_run_job, job_id)
+    return job.snapshot()
+
+
+# ---------------------------------------------------------------------------
+# UI web
+# ---------------------------------------------------------------------------
+
+@app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
+def ui() -> HTMLResponse:
+    html_path = STATIC_DIR / "index.html"
+    if html_path.exists():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        "<h2 style='font-family:sans-serif;padding:40px'>UI belum diunggah.<br>"
+        "Salin <code>static/index.html</code> ke folder aplikasi di server.</h2>",
+        status_code=200,
+    )
 
 
 if __name__ == "__main__":
