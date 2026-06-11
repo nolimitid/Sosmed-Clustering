@@ -300,8 +300,37 @@ def _update_chunk_assignments(chunk: dict, topic_mapping: dict) -> None:
         return
     df["global_topic"] = df["topic"].map(lambda t: mapping.get(str(t), -1))
     out = chunk_dir / "assignments_global.parquet"
-    df.to_parquet(out, index=False)
+    _write_parquet(df, out)
     print(f"[merge] {chunk_dir.name}: {len(df):,} baris -> assignments_global.parquet")
+
+
+def _as_string(v):
+    """Ubah satu nilai menjadi string (decode bytes), pertahankan yang kosong."""
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return pd.NA
+    return str(v)
+
+
+def _write_parquet(df: pd.DataFrame, out: Path) -> None:
+    """Tulis parquet dengan aman terhadap kolom object bertipe campuran.
+
+    Kolom seperti `from_id` dari sumber Elasticsearch bisa berisi campuran int +
+    bytes/str dalam satu kolom object, sehingga pyarrow gagal menebak satu tipe
+    Arrow ("Expected bytes, got a 'int' object"). Bila itu terjadi, paksa kolom
+    object menjadi string (id paling aman disimpan sebagai teks) lalu tulis ulang.
+    """
+    try:
+        df.to_parquet(out, index=False)
+        return
+    except Exception as exc:
+        obj_cols = list(df.select_dtypes(include=["object"]).columns)
+        print(f"[merge] to_parquet gagal ({exc}); mengonversi kolom object "
+              f"ke string lalu coba lagi: {obj_cols}")
+        for col in obj_cols:
+            df[col] = df[col].map(_as_string).astype("string")
+        df.to_parquet(out, index=False)
 
 
 # ---------------------------------------------------------------------------
