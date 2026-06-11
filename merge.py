@@ -180,7 +180,7 @@ def run_merge(
 
     # Kurangi bila > target_max
     if n_natural > target_max:
-        print(f"[merge] mengurangi {n_natural} → {target_max} topik global "
+        print(f"[merge] mengurangi {n_natural} -> {target_max} topik global "
               f"(AgglomerativeClustering)")
         from sklearn.cluster import AgglomerativeClustering
         valid_mask = raw_labels != -1
@@ -222,7 +222,7 @@ def run_merge(
     (output_dir / "global_topic_mapping.json").write_text(
         json.dumps(topic_mapping, indent=2)
     )
-    print("[merge] topic mapping disimpan → global_topic_mapping.json")
+    print("[merge] topic mapping disimpan -> global_topic_mapping.json")
 
     # ---- Agregasi info per global topic ----
     global_info: dict[int, dict] = {
@@ -258,7 +258,7 @@ def run_merge(
         })
     global_summary = pd.DataFrame(rows)
     global_summary.to_csv(output_dir / "global_topics_summary.csv", index=False)
-    print(f"[merge] {len(rows)} topik global → global_topics_summary.csv")
+    print(f"[merge] {len(rows)} topik global -> global_topics_summary.csv")
 
     if graph_edges:
         pd.DataFrame(
@@ -283,7 +283,7 @@ def run_merge(
         _update_chunk_assignments(chunk, topic_mapping)
 
     (output_dir / "merge.done").write_text("ok")
-    print(f"[merge] selesai → {output_dir}/")
+    print(f"[merge] selesai -> {output_dir}/")
 
 
 def _update_chunk_assignments(chunk: dict, topic_mapping: dict) -> None:
@@ -301,7 +301,7 @@ def _update_chunk_assignments(chunk: dict, topic_mapping: dict) -> None:
     df["global_topic"] = df["topic"].map(lambda t: mapping.get(str(t), -1))
     out = chunk_dir / "assignments_global.parquet"
     df.to_parquet(out, index=False)
-    print(f"[merge] {chunk_dir.name}: {len(df):,} baris → assignments_global.parquet")
+    print(f"[merge] {chunk_dir.name}: {len(df):,} baris -> assignments_global.parquet")
 
 
 # ---------------------------------------------------------------------------

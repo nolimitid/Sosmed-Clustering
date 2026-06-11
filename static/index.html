@@ -123,7 +123,7 @@ tr:hover td{background:#fafafa}
 <body>
 
 <div class="hdr">
-  <h1>📊 Sosmed Clustering</h1>
+  <h1>Sosmed Clustering</h1>
   <div class="hdr-right">
     <div class="token-bar">
       <span>Token:</span>
@@ -138,7 +138,7 @@ tr:hover td{background:#fafafa}
 
   <!-- Form Buat Job -->
   <div class="card">
-    <div class="card-title">⚡ Buat Pipeline Job Baru</div>
+    <div class="card-title">Buat Pipeline Job Baru</div>
     <form id="jform">
       <div class="fg">
 
@@ -150,7 +150,7 @@ tr:hover td{background:#fafafa}
 
         <div class="fgi">
           <label>Target Data yang Diproses</label>
-          <input type="number" id="fMaxDocs" value="0" min="0" step="10000">
+          <input type="number" id="fMaxDocs" value="0" min="0" step="1000">
           <span class="hint">0 = semua data project &nbsp;|&nbsp; misal 100000 untuk test 100k</span>
         </div>
 
@@ -177,7 +177,7 @@ tr:hover td{background:#fafafa}
 
           <div class="fgi">
             <label>Ukuran Chunk (dokumen per batch)</label>
-            <input type="number" id="fChunk" value="100000" min="1000" step="10000">
+            <input type="number" id="fChunk" value="100000" min="1000" step="1000">
             <span class="hint">Satu chunk = satu file parquet; default 100k</span>
           </div>
 
@@ -220,7 +220,7 @@ tr:hover td{background:#fafafa}
       </details>
 
       <div class="form-actions">
-        <button type="submit" class="btn btn-primary" id="subBtn">⚡ Mulai Pipeline</button>
+        <button type="submit" class="btn btn-primary" id="subBtn">Mulai Pipeline</button>
       </div>
     </form>
   </div>
@@ -228,8 +228,8 @@ tr:hover td{background:#fafafa}
   <!-- Daftar Job -->
   <div class="card">
     <div class="tbl-hdr">
-      <div class="card-title" style="margin:0">📋 Daftar Job</div>
-      <button class="btn btn-sm btn-gray" onclick="loadJobs()">↻ Refresh</button>
+      <div class="card-title" style="margin:0">Daftar Job</div>
+      <button class="btn btn-sm btn-gray" onclick="loadJobs()">Refresh</button>
     </div>
     <div id="jobList"><div class="empty">Memuat...</div></div>
   </div>
@@ -242,7 +242,7 @@ tr:hover td{background:#fafafa}
     <div class="mhdr">
       <h2 id="logTitle">Log</h2>
       <div style="display:flex;gap:6px;align-items:center">
-        <button class="btn btn-sm btn-gray" onclick="copyLog()">📋 Salin</button>
+        <button class="btn btn-sm btn-gray" onclick="copyLog()">Salin</button>
         <button class="xbtn" onclick="closeLog()">✕</button>
       </div>
     </div>
@@ -302,13 +302,15 @@ function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleString('id-ID', { hour12: false,
     day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
 }
-function fmtDur(job) {
-  const s = job.started_at, e = job.finished_at || Date.now() / 1000;
-  if (!s) return '—';
-  const sec = Math.floor(e - s);
+function fmtSec(sec) {
   if (sec < 60) return sec + 'd';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 'd';
   return Math.floor(sec / 3600) + 'j ' + Math.floor((sec % 3600) / 60) + 'm';
+}
+function fmtDur(job) {
+  const s = job.started_at, e = job.finished_at || Date.now() / 1000;
+  if (!s) return '—';
+  return fmtSec(Math.floor(e - s));
 }
 function fmtBytes(b) {
   if (b < 1024) return b + ' B';
@@ -380,12 +382,15 @@ function renderJobs(jobs) {
       <td>${jobInfo(j)}</td>
       <td>${badge(j.status)}</td>
       <td style="white-space:nowrap">${fmtTime(j.created_at)}</td>
-      <td>${fmtDur(j)}</td>
+      <td id="dur-${j.id}"
+          data-start="${j.started_at || ''}"
+          data-live="${running ? '1' : '0'}"
+          style="font-variant-numeric:tabular-nums;white-space:nowrap">${fmtDur(j)}</td>
       <td><div class="acts">
-        <button class="btn btn-sm btn-blue" onclick="openLog('${j.id}')">📄 Log</button>
-        ${done ? `<button class="btn btn-sm btn-green" onclick="openFiles('${j.id}')">📥 Hasil</button>` : ''}
-        ${running ? `<button class="btn btn-sm btn-gray" onclick="cancelJob('${j.id}')">⏹</button>` : ''}
-        ${!running ? `<button class="btn btn-sm btn-red" onclick="deleteJob('${j.id}')">🗑</button>` : ''}
+        <button class="btn btn-sm btn-blue" onclick="openLog('${j.id}')">Log</button>
+        ${done ? `<button class="btn btn-sm btn-green" onclick="openFiles('${j.id}')">Hasil</button>` : ''}
+        ${running ? `<button class="btn btn-sm btn-gray" onclick="cancelJob('${j.id}')">Batalkan</button>` : ''}
+        ${!running ? `<button class="btn btn-sm btn-red" onclick="deleteJob('${j.id}')">Hapus</button>` : ''}
       </div></td>
     </tr>`;
   }
@@ -489,8 +494,8 @@ async function openFiles(id) {
     html += `<div class="fitem">
       <span><span class="fname">${f.name}</span><span class="fsize">${fmtBytes(f.bytes)}</span></span>
       <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
-        ${isHtml ? `<a href="/jobs/${id}/files/${f.name}" target="_blank" class="btn btn-sm btn-blue">🔍 Buka</a>` : ''}
-        <a href="/jobs/${id}/files/${f.name}" download="${f.name.split('/').pop()}" class="btn btn-sm btn-green">⬇ Unduh</a>
+        ${isHtml ? `<a href="/jobs/${id}/files/${f.name}" target="_blank" class="btn btn-sm btn-blue">Buka</a>` : ''}
+        <a href="/jobs/${id}/files/${f.name}" download="${f.name.split('/').pop()}" class="btn btn-sm btn-green">Unduh</a>
       </div>
     </div>`;
   }
@@ -548,7 +553,7 @@ document.getElementById('jform').addEventListener('submit', async e => {
 
   const btn = document.getElementById('subBtn');
   btn.disabled = true;
-  btn.textContent = '⏳ Memulai…';
+  btn.textContent = 'Memulai...';
 
   const fd = new FormData();
   fd.append('project_id', pid);
@@ -589,7 +594,7 @@ document.getElementById('jform').addEventListener('submit', async e => {
     toast('Gagal: ' + err.message, 'err');
   } finally {
     btn.disabled = false;
-    btn.textContent = '⚡ Mulai Pipeline';
+    btn.textContent = 'Mulai Pipeline';
   }
 });
 
@@ -609,6 +614,15 @@ checkHealth();
 loadJobs();
 setInterval(checkHealth, 15000);
 setInterval(loadJobs, 6000);
+
+// Live timer — update durasi setiap detik untuk job yang sedang berjalan
+setInterval(() => {
+  document.querySelectorAll('td[data-live="1"]').forEach(el => {
+    const start = parseFloat(el.dataset.start);
+    if (!start) return;
+    el.textContent = fmtSec(Math.floor(Date.now() / 1000 - start));
+  });
+}, 1000);
 </script>
 </body>
 </html>
