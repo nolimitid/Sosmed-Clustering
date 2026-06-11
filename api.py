@@ -426,16 +426,16 @@ def _get_job(job_id: str) -> Job:
 
 
 def _download_name(job: Job, rel_path: Path) -> str:
-    """Nama berkas unduhan yang unik per job.
+    """Nama berkas unduhan: `<nama-asli>_<project_id>.<ext>`.
 
-    Prefiks dengan project_id (untuk job pipeline) atau id job, lalu ratakan
-    subdirektori — sehingga `cluster_chunk_00001/metrics.json` dari project A tidak
-    bertabrakan dengan berkas bernama sama dari project lain di folder Unduhan.
-    Contoh: `<project_id>__cluster_chunk_00001_metrics.json`.
+    Suffiks dengan project_id (untuk job pipeline) atau id job sehingga berkas yang
+    diunduh unik antar project di folder Unduhan. Subdirektori (mis.
+    `cluster_chunk_00001/`) diabaikan agar nama tetap ringkas — contoh:
+    `topics_summary_<project_id>.csv`.
     """
-    prefix = job.config.get("project_id") or job.id
-    prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", str(prefix)).strip("_") or job.id
-    return f"{prefix}__" + "_".join(rel_path.parts)
+    pid = job.config.get("project_id") or job.id
+    pid = re.sub(r"[^A-Za-z0-9._-]+", "_", str(pid)).strip("_") or job.id
+    return f"{rel_path.stem}_{pid}{rel_path.suffix}"
 
 
 @app.get("/jobs/{job_id}", dependencies=AUTH)
