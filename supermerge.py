@@ -86,45 +86,54 @@ def supermerge(
     if n_total < 2:
         sys.exit("[supermerge] terlalu sedikit centroid untuk di-cluster")
 
-    # ---- UMAP + HDBSCAN ----
-    from hdbscan import HDBSCAN
-    from umap import UMAP
+    # ---- Metode utama: graph + Leiden ----
+    raw_labels: np.ndarray
+    reduced = None
+    try:
+        graph_threshold = 0.25
+        print(f"[supermerge] graph analysis (cosine threshold={graph_threshold}) + Leiden "
+              f"pada {n_total} centroid ...")
+        raw_labels  = _leiden_cluster(all_centroids, graph_threshold, seed)
+        valid_super = sorted(set(raw_labels.tolist()) - {-1})
+        print(f"[supermerge] Leiden: {len(valid_super)} super cluster ditemukan")
+    except ImportError:
+        valid_super = []
 
-    mcs = min_cluster_size
-    if mcs == 0:
-        mcs = max(2, n_total // (top_n * 6))
-
-    n_neighbors  = min(15, n_total - 1)
-    n_components = min(5, n_total - 2)
-    print(f"[supermerge] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
-          f"HDBSCAN(min_cluster_size={mcs}) pada {n_total} centroid")
-
-    umap_model = UMAP(
-        n_neighbors=n_neighbors,
-        n_components=n_components,
-        min_dist=0.0,
-        metric="cosine",
-        random_state=seed,
-    )
-    reduced = umap_model.fit_transform(all_centroids)
-
-    hdbscan_model = HDBSCAN(
-        min_cluster_size=mcs,
-        min_samples=max(1, mcs // 4),
-        metric="euclidean",
-        cluster_selection_method="eom",
-        prediction_data=True,
-    )
-    raw_labels = hdbscan_model.fit_predict(reduced)
-
-    valid_super = sorted(set(raw_labels.tolist()) - {-1})
+    # ---- Fallback: UMAP + HDBSCAN ----
     if not valid_super:
-        print("[supermerge] HDBSCAN tidak menghasilkan cluster — tiap centroid jadi super topic sendiri")
-        raw_labels  = np.arange(n_total, dtype=np.int32)
-        valid_super = list(range(n_total))
+        print("[supermerge] igraph/leidenalg tidak tersedia, fallback ke UMAP+HDBSCAN")
+        from hdbscan import HDBSCAN
+        from umap import UMAP
 
-    n_super = len(valid_super)
-    print(f"[supermerge] {n_super} super cluster ditemukan")
+        mcs = min_cluster_size or max(2, int(n_total ** 0.35))
+        n_neighbors  = min(15, n_total - 1)
+        n_components = min(5, n_total - 2)
+        print(f"[supermerge] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
+              f"HDBSCAN(min_cluster_size={mcs}) pada {n_total} centroid")
+
+        reduced    = UMAP(n_neighbors=n_neighbors, n_components=n_components,
+                          min_dist=0.0, metric="cosine",
+                          random_state=seed).fit_transform(all_centroids)
+        raw_labels = HDBSCAN(min_cluster_size=mcs, min_samples=max(1, mcs // 4),
+                             metric="euclidean", cluster_selection_method="eom",
+                             prediction_data=True).fit_predict(reduced)
+        valid_super = sorted(set(raw_labels.tolist()) - {-1})
+        if not valid_super:
+            raw_labels  = np.arange(n_total, dtype=np.int32)
+            valid_super = list(range(n_total))
+
+    # Bila masih < top_n, paksa AgglomerativeClustering
+    if len(valid_super) < top_n and n_total >= top_n:
+        print(f"[supermerge] hanya {len(valid_super)} cluster < top_n={top_n}, "
+              f"fallback ke AgglomerativeClustering(n_clusters={top_n})")
+        from sklearn.cluster import AgglomerativeClustering
+        base = reduced if reduced is not None else all_centroids
+        raw_labels  = AgglomerativeClustering(
+            n_clusters=top_n, metric="euclidean", linkage="ward",
+        ).fit_predict(base).astype(np.int32)
+        valid_super = sorted(set(raw_labels.tolist()))
+
+    print(f"[supermerge] {len(valid_super)} super cluster digunakan")
 
     # Assign outlier centroid ke super topic terdekat
     sc_centroids = np.stack([
@@ -172,10 +181,22 @@ def supermerge(
     )
     df.insert(0, "rank", df.index + 1)
 
-    top_df  = df.head(top_n)
-    out_csv = output_dir / f"supermerge_top{top_n}_summary.csv"
-    top_df.to_csv(out_csv, index=False)
-    print(f"[supermerge] top {top_n} super cluster -> {out_csv.name}")
+    # Simpan semua cluster mentah
+    all_csv = output_dir / "supermerge_all_clusters.csv"
+    df.to_csv(all_csv, index=False)
+    print(f"[supermerge] {len(df)} cluster mentah -> {all_csv.name}")
+
+    # Simpan tiap irisan top-N (top_n dari parameter + 50 bila berbeda)
+    top_ns = sorted(set([top_n, 50]))
+    for n in top_ns:
+        if n > len(df):
+            continue
+        slice_df = df.head(n)
+        slice_csv = output_dir / f"supermerge_top{n}_summary.csv"
+        slice_df.to_csv(slice_csv, index=False)
+        print(f"[supermerge] top {n} super cluster -> {slice_csv.name}")
+
+    top_df = df.head(top_n)
     for _, r in top_df.iterrows():
         print(f"  #{int(r['rank'])}: {int(r['count']):,} docs | "
               f"{int(r['n_projects'])} project | {str(r['keywords'])[:60]}")
@@ -194,6 +215,38 @@ def supermerge(
     print(f"[supermerge] selesai -> {output_dir}/")
 
 
+def _leiden_cluster(
+    embeddings: np.ndarray,
+    threshold: float,
+    seed: int,
+) -> np.ndarray:
+    """Cluster via cosine-similarity graph + Leiden community detection."""
+    import igraph as ig
+    import leidenalg
+
+    n = len(embeddings)
+    sim = (embeddings @ embeddings.T).astype(np.float32)
+    np.fill_diagonal(sim, 0.0)
+
+    ii, jj = np.where(sim >= threshold)
+    mask   = ii < jj
+    ii, jj = ii[mask], jj[mask]
+
+    g = ig.Graph(n=n, edges=list(zip(ii.tolist(), jj.tolist())))
+    g.es["weight"] = sim[ii, jj].tolist()
+
+    partition = leidenalg.find_partition(
+        g, leidenalg.ModularityVertexPartition,
+        weights="weight" if len(g.es) > 0 else None,
+        seed=seed,
+    )
+    labels = np.full(n, -1, dtype=np.int32)
+    for mid, community in enumerate(partition):
+        for node in community:
+            labels[node] = mid
+    return labels
+
+
 def _cluster_and_rank(
     all_embeddings: np.ndarray,
     rows_meta: list[dict],       # tiap entry: {count, keywords, source}
@@ -202,50 +255,62 @@ def _cluster_and_rank(
     seed: int,
     output_dir: Path,
     label: str = "supermerge-csv",
+    graph_threshold: float = 0.25,
 ) -> None:
-    """Shared logic: UMAP+HDBSCAN pada embeddings, agregasi count, simpan top-N CSV."""
+    """Cluster embeddings dengan graph+Leiden (utama) atau UMAP+HDBSCAN (fallback)."""
     n_total = len(all_embeddings)
     print(f"[{label}] {n_total} topik akan di-cluster")
 
-    from hdbscan import HDBSCAN
-    from umap import UMAP
+    raw_labels: np.ndarray
+    reduced = None
 
-    # mcs pakai akar pangkat untuk skala besar (ribuan topik tetap dapat banyak cluster)
-    mcs = min_cluster_size or max(2, int(n_total ** 0.35))
-    n_neighbors  = min(15, n_total - 1)
-    n_components = min(5,  n_total - 2)
-    print(f"[{label}] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
-          f"HDBSCAN(min_cluster_size={mcs})")
+    # ---- Metode utama: graph + Leiden ----
+    try:
+        print(f"[{label}] graph analysis (cosine threshold={graph_threshold}) + Leiden ...")
+        raw_labels  = _leiden_cluster(all_embeddings, graph_threshold, seed)
+        valid_super = sorted(set(raw_labels.tolist()) - {-1})
+        print(f"[{label}] Leiden: {len(valid_super)} komunitas ditemukan")
+    except ImportError:
+        valid_super = []
 
-    if n_total >= 4:
-        reduced = UMAP(
-            n_neighbors=n_neighbors, n_components=n_components,
-            min_dist=0.0, metric="cosine", random_state=seed,
-        ).fit_transform(all_embeddings)
-        raw_labels = HDBSCAN(
-            min_cluster_size=mcs, min_samples=max(1, mcs // 4),
-            metric="euclidean", cluster_selection_method="eom",
-        ).fit_predict(reduced)
-    else:
-        raw_labels = np.arange(n_total, dtype=np.int32)
-
-    valid_super = sorted(set(raw_labels.tolist()) - {-1})
+    # ---- Fallback: UMAP + HDBSCAN ----
     if not valid_super:
-        raw_labels  = np.arange(n_total, dtype=np.int32)
-        valid_super = list(range(n_total))
+        print(f"[{label}] igraph/leidenalg tidak tersedia, fallback ke UMAP+HDBSCAN")
+        from hdbscan import HDBSCAN
+        from umap import UMAP
 
-    # Bila HDBSCAN menghasilkan lebih sedikit cluster dari top_n, paksa pakai
-    # AgglomerativeClustering agar output selalu punya setidaknya top_n cluster
-    n_natural = len(valid_super)
-    if n_natural < top_n and n_total >= top_n:
-        print(f"[{label}] HDBSCAN hanya {n_natural} cluster < top_n={top_n}, "
+        mcs = min_cluster_size or max(2, int(n_total ** 0.35))
+        n_neighbors  = min(15, n_total - 1)
+        n_components = min(5,  n_total - 2)
+        print(f"[{label}] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
+              f"HDBSCAN(min_cluster_size={mcs})")
+
+        if n_total >= 4:
+            reduced    = UMAP(n_neighbors=n_neighbors, n_components=n_components,
+                              min_dist=0.0, metric="cosine",
+                              random_state=seed).fit_transform(all_embeddings)
+            raw_labels = HDBSCAN(min_cluster_size=mcs, min_samples=max(1, mcs // 4),
+                                 metric="euclidean",
+                                 cluster_selection_method="eom").fit_predict(reduced)
+        else:
+            raw_labels = np.arange(n_total, dtype=np.int32)
+
+        valid_super = sorted(set(raw_labels.tolist()) - {-1})
+        if not valid_super:
+            raw_labels  = np.arange(n_total, dtype=np.int32)
+            valid_super = list(range(n_total))
+
+    # Bila masih < top_n cluster, paksa AgglomerativeClustering
+    if len(valid_super) < top_n and n_total >= top_n:
+        print(f"[{label}] hanya {len(valid_super)} cluster < top_n={top_n}, "
               f"fallback ke AgglomerativeClustering(n_clusters={top_n})")
         from sklearn.cluster import AgglomerativeClustering
-        agg_labels = AgglomerativeClustering(
+        base = reduced if reduced is not None else all_embeddings
+        raw_labels  = AgglomerativeClustering(
             n_clusters=top_n, metric="euclidean", linkage="ward",
-        ).fit_predict(reduced if n_total >= 4 else all_embeddings)
-        raw_labels  = agg_labels.astype(np.int32)
+        ).fit_predict(base).astype(np.int32)
         valid_super = sorted(set(raw_labels.tolist()))
+
     print(f"[{label}] {len(valid_super)} super cluster digunakan")
 
     # Assign outlier ke super topic terdekat (hitung matrix 1x, bukan n_total kali)
@@ -321,10 +386,17 @@ def _cluster_and_rank(
     df.to_csv(all_csv, index=False)
     print(f"[{label}] {len(df)} cluster mentah -> {all_csv.name}")
 
-    top_df  = df.head(top_n)
-    out_csv = output_dir / f"{label}_top{top_n}_summary.csv"
-    top_df.to_csv(out_csv, index=False)
-    print(f"[{label}] top {top_n} super cluster -> {out_csv.name}")
+    # Simpan tiap irisan top-N (top_n dari parameter + 50 bila berbeda)
+    top_ns = sorted(set([top_n, 50]))
+    for n in top_ns:
+        if n > len(df):
+            continue
+        slice_df = df.head(n)
+        slice_csv = output_dir / f"{label}_top{n}_summary.csv"
+        slice_df.to_csv(slice_csv, index=False)
+        print(f"[{label}] top {n} super cluster -> {slice_csv.name}")
+
+    top_df = df.head(top_n)
     for _, r in top_df.iterrows():
         print(f"  #{int(r['rank'])}: {int(r['count']):,} docs | "
               f"{int(r['n_sources'])} sumber | {str(r['keywords'])[:60]}")
