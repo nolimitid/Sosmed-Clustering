@@ -200,7 +200,8 @@ def _cluster_and_rank(
     from hdbscan import HDBSCAN
     from umap import UMAP
 
-    mcs = min_cluster_size or max(2, n_total // (top_n * 6))
+    # mcs pakai akar pangkat untuk skala besar (ribuan topik tetap dapat banyak cluster)
+    mcs = min_cluster_size or max(2, int(n_total ** 0.35))
     n_neighbors  = min(15, n_total - 1)
     n_components = min(5,  n_total - 2)
     print(f"[{label}] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
@@ -223,6 +224,20 @@ def _cluster_and_rank(
         raw_labels  = np.arange(n_total, dtype=np.int32)
         valid_super = list(range(n_total))
 
+    # Bila HDBSCAN menghasilkan lebih sedikit cluster dari top_n, paksa pakai
+    # AgglomerativeClustering agar output selalu punya setidaknya top_n cluster
+    n_natural = len(valid_super)
+    if n_natural < top_n and n_total >= top_n:
+        print(f"[{label}] HDBSCAN hanya {n_natural} cluster < top_n={top_n}, "
+              f"fallback ke AgglomerativeClustering(n_clusters={top_n})")
+        from sklearn.cluster import AgglomerativeClustering
+        agg_labels = AgglomerativeClustering(
+            n_clusters=top_n, metric="euclidean", linkage="ward",
+        ).fit_predict(reduced if n_total >= 4 else all_embeddings)
+        raw_labels  = agg_labels.astype(np.int32)
+        valid_super = sorted(set(raw_labels.tolist()))
+    print(f"[{label}] {len(valid_super)} super cluster digunakan")
+
     # Assign outlier ke super topic terdekat (hitung matrix 1x, bukan n_total kali)
     sc_cents = np.stack([
         all_embeddings[raw_labels == s].mean(axis=0) for s in valid_super
@@ -230,8 +245,6 @@ def _cluster_and_rank(
     sc_cents /= np.linalg.norm(sc_cents, axis=1, keepdims=True) + 1e-12
     best_idx   = (all_embeddings @ sc_cents.T).argmax(axis=1)  # (n_total,)
     super_labels = np.array([valid_super[int(b)] for b in best_idx], dtype=np.int32)
-
-    print(f"[{label}] {len(valid_super)} super cluster ditemukan")
 
     has_names    = any(meta.get("name")     for meta in rows_meta)
     has_examples = any(meta.get("examples") for meta in rows_meta)
@@ -292,6 +305,12 @@ def _cluster_and_rank(
 
     df = pd.DataFrame(out_rows).sort_values("count", ascending=False).reset_index(drop=True)
     df.insert(0, "rank", df.index + 1)
+
+    # Simpan semua cluster mentah (sebelum dipotong top_n)
+    all_csv = output_dir / f"{label}_all_clusters.csv"
+    df.to_csv(all_csv, index=False)
+    print(f"[{label}] {len(df)} cluster mentah -> {all_csv.name}")
+
     top_df  = df.head(top_n)
     out_csv = output_dir / f"{label}_top{top_n}_summary.csv"
     top_df.to_csv(out_csv, index=False)
