@@ -180,6 +180,16 @@ def supermerge(
         print(f"  #{int(r['rank'])}: {int(r['count']):,} docs | "
               f"{int(r['n_projects'])} project | {str(r['keywords'])[:60]}")
 
+    # Total seluruh data = jumlah count di SEMUA super cluster (bukan hanya top-N)
+    total_docs = int(df["count"].sum())
+    print(f"[supermerge] ── TOTAL data di semua {len(df)} super cluster: {total_docs:,} dokumen ──")
+    (output_dir / "metrics.json").write_text(
+        json.dumps({"total_documents": total_docs,
+                    "total_super_clusters": int(len(df)),
+                    "top_n": int(top_n)}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
     (output_dir / "supermerge.done").write_text("ok")
     print(f"[supermerge] selesai -> {output_dir}/")
 
@@ -318,6 +328,16 @@ def _cluster_and_rank(
     for _, r in top_df.iterrows():
         print(f"  #{int(r['rank'])}: {int(r['count']):,} docs | "
               f"{int(r['n_sources'])} sumber | {str(r['keywords'])[:60]}")
+
+    # Total seluruh data = jumlah count di SEMUA super cluster (bukan hanya top-N)
+    total_docs = int(df["count"].sum())
+    print(f"[{label}] ── TOTAL data di semua {len(df)} super cluster: {total_docs:,} dokumen ──")
+    (output_dir / "metrics.json").write_text(
+        json.dumps({"total_documents": total_docs,
+                    "total_super_clusters": int(len(df)),
+                    "top_n": int(top_n)}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     (output_dir / f"{label}.done").write_text("ok")
     print(f"[{label}] selesai -> {output_dir}/")
