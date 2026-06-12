@@ -575,6 +575,59 @@ async def create_pipeline_job(
 # Super-merge jobs (gabung semua project, ambil top-N cluster terbesar)
 # ---------------------------------------------------------------------------
 
+@app.post("/supermerge-csv-jobs", dependencies=AUTH)
+async def create_supermerge_csv_job(
+    files: list[UploadFile] = File(..., description="satu atau beberapa CSV topics_summary"),
+    top_n: int = Form(10),
+    model: str = Form("LazarusNLP/all-indo-e5-small-v4"),
+    min_cluster_size: int = Form(0),
+    seed: int = Form(42),
+) -> dict:
+    job_id  = uuid.uuid4().hex[:12]
+    job_dir = JOBS_ROOT / job_id
+    out_dir = job_dir / "output"
+    csv_dir = job_dir / "csvs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_paths: list[str] = []
+    for f in files:
+        safe_name = Path(f.filename or "upload.csv").name  # strip directory components
+        if not safe_name:
+            safe_name = f"upload_{uuid.uuid4().hex[:8]}.csv"
+        dest = csv_dir / safe_name
+        dest.write_bytes(await f.read())
+        saved_paths.append(str(dest))
+
+    config = {
+        "job_type":          "supermerge-csv",
+        "top_n":             top_n,
+        "model":             model,
+        "min_cluster_size":  min_cluster_size,
+        "seed":              seed,
+        "n_files":           len(saved_paths),
+    }
+    config["cmd_args"] = [
+        sys.executable, "-u", str(SUPERMERGE_SCRIPT),
+        "csv",
+        "--csv-files",        *saved_paths,
+        "--output-dir",       str(out_dir),
+        "--top-n",            str(top_n),
+        "--model",            model,
+        "--min-cluster-size", str(min_cluster_size),
+        "--seed",             str(seed),
+    ]
+
+    log_path = job_dir / "job.log"
+    log_path.touch()
+    job = Job(job_id, config, out_dir, out_dir, log_path)
+    with _lock:
+        JOBS[job_id] = job
+    _save_status(job)
+    executor.submit(_run_job, job_id)
+    return job.snapshot()
+
+
 @app.post("/supermerge-jobs", dependencies=AUTH)
 async def create_supermerge_job(
     top_n: int = Form(10, description="ambil N cluster terbesar"),
@@ -595,6 +648,7 @@ async def create_supermerge_job(
     }
     config["cmd_args"] = [
         sys.executable, "-u", str(SUPERMERGE_SCRIPT),
+        "jobs",
         "--jobs-dir",         str(JOBS_ROOT),
         "--output-dir",       str(out_dir),
         "--top-n",            str(top_n),

@@ -184,25 +184,199 @@ def supermerge(
     print(f"[supermerge] selesai -> {output_dir}/")
 
 
+def _cluster_and_rank(
+    all_embeddings: np.ndarray,
+    rows_meta: list[dict],       # tiap entry: {count, keywords, source}
+    top_n: int,
+    min_cluster_size: int,
+    seed: int,
+    output_dir: Path,
+    label: str = "supermerge-csv",
+) -> None:
+    """Shared logic: UMAP+HDBSCAN pada embeddings, agregasi count, simpan top-N CSV."""
+    n_total = len(all_embeddings)
+    print(f"[{label}] {n_total} topik akan di-cluster")
+
+    from hdbscan import HDBSCAN
+    from umap import UMAP
+
+    mcs = min_cluster_size or max(2, n_total // (top_n * 6))
+    n_neighbors  = min(15, n_total - 1)
+    n_components = min(5,  n_total - 2)
+    print(f"[{label}] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
+          f"HDBSCAN(min_cluster_size={mcs})")
+
+    if n_total >= 4:
+        reduced = UMAP(
+            n_neighbors=n_neighbors, n_components=n_components,
+            min_dist=0.0, metric="cosine", random_state=seed,
+        ).fit_transform(all_embeddings)
+        raw_labels = HDBSCAN(
+            min_cluster_size=mcs, min_samples=max(1, mcs // 4),
+            metric="euclidean", cluster_selection_method="eom",
+        ).fit_predict(reduced)
+    else:
+        raw_labels = np.arange(n_total, dtype=np.int32)
+
+    valid_super = sorted(set(raw_labels.tolist()) - {-1})
+    if not valid_super:
+        raw_labels  = np.arange(n_total, dtype=np.int32)
+        valid_super = list(range(n_total))
+
+    # Assign outlier ke super topic terdekat (hitung matrix 1x, bukan n_total kali)
+    sc_cents = np.stack([
+        all_embeddings[raw_labels == s].mean(axis=0) for s in valid_super
+    ]).astype(np.float32)
+    sc_cents /= np.linalg.norm(sc_cents, axis=1, keepdims=True) + 1e-12
+    best_idx   = (all_embeddings @ sc_cents.T).argmax(axis=1)  # (n_total,)
+    super_labels = np.array([valid_super[int(b)] for b in best_idx], dtype=np.int32)
+
+    print(f"[{label}] {len(valid_super)} super cluster ditemukan")
+
+    super_info: dict[int, dict] = {s: {"count": 0, "kw_parts": [], "sources": set()} for s in valid_super}
+    for i, s in enumerate(super_labels):
+        meta = rows_meta[i]
+        super_info[int(s)]["count"]   += int(meta.get("count", 0))
+        kw = str(meta.get("keywords", ""))
+        if kw:
+            super_info[int(s)]["kw_parts"].append(kw)
+        src = meta.get("source", "")
+        if src:
+            super_info[int(s)]["sources"].add(src)
+
+    out_rows = []
+    for s in sorted(valid_super):
+        info   = super_info[s]
+        all_kw = " ".join(info["kw_parts"])
+        top_kw = " ".join(w for w, _ in Counter(all_kw.split()).most_common(10))
+        out_rows.append({
+            "super_topic": s,
+            "count":       info["count"],
+            "n_sources":   len(info["sources"]),
+            "keywords":    top_kw,
+        })
+
+    df = pd.DataFrame(out_rows).sort_values("count", ascending=False).reset_index(drop=True)
+    df.insert(0, "rank", df.index + 1)
+    top_df  = df.head(top_n)
+    out_csv = output_dir / f"{label}_top{top_n}_summary.csv"
+    top_df.to_csv(out_csv, index=False)
+    print(f"[{label}] top {top_n} super cluster -> {out_csv.name}")
+    for _, r in top_df.iterrows():
+        print(f"  #{int(r['rank'])}: {int(r['count']):,} docs | "
+              f"{int(r['n_sources'])} sumber | {str(r['keywords'])[:60]}")
+
+    (output_dir / f"{label}.done").write_text("ok")
+    print(f"[{label}] selesai -> {output_dir}/")
+
+
+def supermerge_from_csvs(
+    csv_paths: list[Path],
+    output_dir: Path,
+    top_n: int = 10,
+    model_name: str = "LazarusNLP/all-indo-e5-small-v4",
+    min_cluster_size: int = 0,
+    seed: int = 42,
+) -> None:
+    """Super-merge dari satu atau beberapa CSV topics_summary.
+
+    Setiap CSV harus punya kolom: Topic, Count, Keywords.
+    project_id diambil dari nama file (topics_summary_<uuid>.csv) bila ada.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rows_meta: list[dict] = []
+    for csv_path in csv_paths:
+        source = csv_path.stem  # e.g. topics_summary_a64c0ae9-...
+        df = pd.read_csv(csv_path)
+        # Normalisasi nama kolom (case-insensitive)
+        df.columns = [c.strip() for c in df.columns]
+        col_map   = {c.lower(): c for c in df.columns}
+        count_col = col_map.get("count")
+        kw_col    = col_map.get("keywords")
+        if not count_col or not kw_col:
+            print(f"[supermerge-csv] {csv_path.name}: kolom Count/Keywords tidak ditemukan, dilewati")
+            continue
+        # Konversi Count ke numerik sekali (aman untuk nilai campuran)
+        df[count_col] = pd.to_numeric(df[count_col], errors="coerce").fillna(0).astype(int)
+        for _, row in df.iterrows():
+            kw = str(row[kw_col]).strip()
+            if not kw or kw.lower() == "nan":
+                continue
+            rows_meta.append({
+                "count":    int(row[count_col]),
+                "keywords": kw,
+                "source":   source,
+            })
+        print(f"[supermerge-csv] {csv_path.name}: {len(df)} topik dimuat")
+
+    if not rows_meta:
+        sys.exit("[supermerge-csv] tidak ada baris valid dari CSV yang diberikan")
+
+    print(f"[supermerge-csv] total {len(rows_meta)} topik dari {len(csv_paths)} CSV")
+    print(f"[supermerge-csv] embed keywords dengan model {model_name} ...")
+
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(model_name)
+    keywords_list = [r["keywords"] for r in rows_meta]
+    embeddings = model.encode(
+        keywords_list,
+        batch_size=128,
+        show_progress_bar=True,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    ).astype(np.float32)
+
+    _cluster_and_rank(
+        embeddings, rows_meta, top_n, min_cluster_size, seed,
+        output_dir, label="supermerge-csv",
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--jobs-dir",          required=True, type=Path,
-                   help="folder api_jobs/ yang berisi semua hasil pipeline per project")
-    p.add_argument("--output-dir",        required=True, type=Path,
-                   help="folder output supermerge")
-    p.add_argument("--top-n",             type=int, default=10,
-                   help="ambil N cluster terbesar (default: 10)")
-    p.add_argument("--min-cluster-size",  type=int, default=0,
-                   help="min_cluster_size HDBSCAN (0 = auto)")
-    p.add_argument("--seed",              type=int, default=42)
+    sub = p.add_subparsers(dest="cmd")
+
+    # mode 1: dari api_jobs (centroid .npy)
+    p1 = sub.add_parser("jobs", help="super-merge dari api_jobs (default)")
+    p1.add_argument("--jobs-dir",         required=True, type=Path)
+    p1.add_argument("--output-dir",       required=True, type=Path)
+    p1.add_argument("--top-n",            type=int, default=10)
+    p1.add_argument("--min-cluster-size", type=int, default=0)
+    p1.add_argument("--seed",             type=int, default=42)
+
+    # mode 2: dari CSV topics_summary
+    p2 = sub.add_parser("csv", help="super-merge dari satu atau beberapa CSV topics_summary")
+    p2.add_argument("--csv-files",        required=True, nargs="+", type=Path,
+                    help="satu atau beberapa file CSV topics_summary")
+    p2.add_argument("--output-dir",       required=True, type=Path)
+    p2.add_argument("--top-n",            type=int, default=10)
+    p2.add_argument("--model",            type=str, default="LazarusNLP/all-indo-e5-small-v4")
+    p2.add_argument("--min-cluster-size", type=int, default=0)
+    p2.add_argument("--seed",             type=int, default=42)
+
     args = p.parse_args()
-    supermerge(
-        jobs_dir=args.jobs_dir,
-        output_dir=args.output_dir,
-        top_n=args.top_n,
-        min_cluster_size=args.min_cluster_size,
-        seed=args.seed,
-    )
+
+    if args.cmd == "csv":
+        supermerge_from_csvs(
+            csv_paths=args.csv_files,
+            output_dir=args.output_dir,
+            top_n=args.top_n,
+            model_name=args.model,
+            min_cluster_size=args.min_cluster_size,
+            seed=args.seed,
+        )
+    elif args.cmd == "jobs":
+        supermerge(
+            jobs_dir=args.jobs_dir,
+            output_dir=args.output_dir,
+            top_n=args.top_n,
+            min_cluster_size=args.min_cluster_size,
+            seed=args.seed,
+        )
+    else:
+        p.print_help()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

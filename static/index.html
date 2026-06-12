@@ -234,15 +234,15 @@ tr:hover td{background:#fafafa}
     </form>
   </div>
 
-  <!-- Super Merge -->
+  <!-- Super Merge dari api_jobs -->
   <div class="card">
-    <div class="card-title">Super Merge — Gabung Semua Project</div>
+    <div class="card-title">Super Merge — Gabung Semua Project (dari pipeline)</div>
     <form id="smform">
       <div class="fg">
         <div class="fgi">
           <label>Top N Cluster</label>
           <input type="number" id="smTopN" value="10" min="1" max="200">
-          <span class="hint">Ambil N cluster terbesar dari seluruh project (berdasarkan jumlah dokumen)</span>
+          <span class="hint">Ambil N cluster terbesar dari seluruh project</span>
         </div>
         <div class="fgi">
           <label>Min Cluster Size</label>
@@ -252,6 +252,35 @@ tr:hover td{background:#fafafa}
       </div>
       <div style="margin-top:14px">
         <button type="submit" class="btn btn-primary" id="smBtn">Jalankan Super Merge</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Super Merge dari CSV -->
+  <div class="card">
+    <div class="card-title">Super Merge — Upload CSV Topics Summary</div>
+    <form id="smcsvform">
+      <div class="fg">
+        <div class="fgi full">
+          <label>File CSV Topics Summary *</label>
+          <input type="file" id="smcsvFiles" accept=".csv" multiple required
+                 style="padding:6px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.88rem;background:#fff;width:100%">
+          <span class="hint">Upload 1 atau banyak file CSV (topics_summary per project). Semua akan digabung menjadi 1 hasil.</span>
+          <span id="smcsvCount" style="font-size:.78rem;color:#3b82f6;margin-top:3px"></span>
+        </div>
+        <div class="fgi">
+          <label>Top N Cluster</label>
+          <input type="number" id="smcsvTopN" value="10" min="1" max="200">
+          <span class="hint">Ambil N cluster terbesar dari semua CSV</span>
+        </div>
+        <div class="fgi">
+          <label>Min Cluster Size</label>
+          <input type="number" id="smcsvMcs" value="0" min="0">
+          <span class="hint">0 = otomatis</span>
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <button type="submit" class="btn btn-primary" id="smcsvBtn">Jalankan Super Merge CSV</button>
       </div>
     </form>
   </div>
@@ -697,6 +726,48 @@ document.getElementById('smform').addEventListener('submit', async e => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Jalankan Super Merge';
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Super Merge CSV form
+// ---------------------------------------------------------------------------
+document.getElementById('smcsvFiles').addEventListener('change', e => {
+  const n = e.target.files.length;
+  document.getElementById('smcsvCount').textContent =
+    n ? `${n} file dipilih` : '';
+});
+
+document.getElementById('smcsvform').addEventListener('submit', async e => {
+  e.preventDefault();
+  const files = document.getElementById('smcsvFiles').files;
+  if (!files.length) { toast('Pilih minimal 1 file CSV', 'err'); return; }
+
+  const btn = document.getElementById('smcsvBtn');
+  btn.disabled = true;
+  btn.textContent = 'Mengupload...';
+
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  fd.append('top_n',            document.getElementById('smcsvTopN').value);
+  fd.append('min_cluster_size', document.getElementById('smcsvMcs').value);
+
+  try {
+    const r = await fetch('/supermerge-csv-jobs', { method: 'POST', headers: hdrs(), body: fd });
+    const d = await r.json();
+    if (r.ok) {
+      toast(`Super Merge CSV ${d.id} dimulai! (${files.length} file)`, 'ok');
+      document.getElementById('smcsvform').reset();
+      document.getElementById('smcsvCount').textContent = '';
+      loadJobs();
+    } else {
+      toast('Error: ' + (d.detail || JSON.stringify(d)), 'err');
+    }
+  } catch (err) {
+    toast('Gagal: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Jalankan Super Merge CSV';
   }
 });
 
