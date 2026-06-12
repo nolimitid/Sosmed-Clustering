@@ -277,7 +277,7 @@ def run_merge(
 
     try:
         fake_info = global_summary.rename(
-            columns={"global_topic": "Topic", "keywords": "Name"}
+            columns={"global_topic": "Topic", "keywords": "Name", "count": "Count"}
         )
         visualize_topic_graph(
             valid_global_ids, graph_edges, meta_map,
@@ -304,7 +304,7 @@ def _update_chunk_assignments(chunk: dict, topic_mapping: dict) -> None:
     mapping = topic_mapping.get(str(chunk_dir), {})
     if not mapping:
         return
-    df = pd.read_csv(assignments_path)
+    df = pd.read_csv(assignments_path, low_memory=False)
     if "topic" not in df.columns:
         return
     df["global_topic"] = df["topic"].map(lambda t: mapping.get(str(t), -1))
@@ -325,21 +325,19 @@ def _as_string(v):
 def _write_parquet(df: pd.DataFrame, out: Path) -> None:
     """Tulis parquet dengan aman terhadap kolom object bertipe campuran.
 
-    Kolom seperti `from_id` dari sumber Elasticsearch bisa berisi campuran int +
-    bytes/str dalam satu kolom object, sehingga pyarrow gagal menebak satu tipe
-    Arrow ("Expected bytes, got a 'int' object"). Bila itu terjadi, paksa kolom
-    object menjadi string (id paling aman disimpan sebagai teks) lalu tulis ulang.
+    Kolom seperti `from_id` dari ES bisa berisi campuran int + bytes/str dalam
+    satu kolom object — pyarrow gagal menebak tipe Arrow tunggal. Konversi semua
+    kolom object ke string secara proaktif sebelum menulis.
     """
+    df = df.copy()
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].map(_as_string).astype("string")
     try:
         df.to_parquet(out, index=False)
-        return
     except Exception as exc:
-        obj_cols = list(df.select_dtypes(include=["object"]).columns)
-        print(f"[merge] to_parquet gagal ({exc}); mengonversi kolom object "
-              f"ke string lalu coba lagi: {obj_cols}")
-        for col in obj_cols:
-            df[col] = df[col].map(_as_string).astype("string")
-        df.to_parquet(out, index=False)
+        # Last resort: tulis dengan engine fastparquet bila pyarrow masih gagal
+        print(f"[merge] to_parquet pyarrow gagal ({exc}); coba engine='fastparquet'")
+        df.to_parquet(out, index=False, engine="fastparquet")
 
 
 # ---------------------------------------------------------------------------
