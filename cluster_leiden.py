@@ -319,6 +319,8 @@ def main() -> None:
     p.add_argument("--target-max", type=int, default=50)
     p.add_argument("--fit-sample", type=int, default=300_000,
                    help="maks teks unik untuk build graph & Leiden (0 = semua)")
+    p.add_argument("--min-cluster-size", type=int, default=0,
+                   help="tidak dipakai oleh Leiden (hanya untuk kompatibilitas dengan pipeline.py)")
     p.add_argument("--min-content-tokens", type=int, default=2)
     p.add_argument("--assign-outliers", action="store_true")
     p.add_argument("--keep-emoji",  action="store_true")
