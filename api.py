@@ -56,9 +56,10 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 HERE = Path(__file__).resolve().parent
-CLUSTER_SCRIPT  = HERE / "cluster.py"
-PIPELINE_SCRIPT = HERE / "pipeline.py"
-STATIC_DIR      = HERE / "static"
+CLUSTER_SCRIPT     = HERE / "cluster.py"
+PIPELINE_SCRIPT    = HERE / "pipeline.py"
+SUPERMERGE_SCRIPT  = HERE / "supermerge.py"
+STATIC_DIR         = HERE / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 JOBS_ROOT = Path(os.environ.get("API_JOBS_DIR", HERE / "api_jobs"))
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -559,6 +560,47 @@ async def create_pipeline_job(
         "seed": seed,
     }
     config["cmd_args"] = build_pipeline_command(config, out_dir)
+
+    log_path = job_dir / "job.log"
+    log_path.touch()
+    job = Job(job_id, config, out_dir, out_dir, log_path)
+    with _lock:
+        JOBS[job_id] = job
+    _save_status(job)
+    executor.submit(_run_job, job_id)
+    return job.snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Super-merge jobs (gabung semua project, ambil top-N cluster terbesar)
+# ---------------------------------------------------------------------------
+
+@app.post("/supermerge-jobs", dependencies=AUTH)
+async def create_supermerge_job(
+    top_n: int = Form(10, description="ambil N cluster terbesar"),
+    min_cluster_size: int = Form(0, description="min_cluster_size HDBSCAN (0 = auto)"),
+    seed: int = Form(42),
+) -> dict:
+    job_id  = uuid.uuid4().hex[:12]
+    job_dir = JOBS_ROOT / job_id
+    out_dir = job_dir / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    config = {
+        "job_type":          "supermerge",
+        "top_n":             top_n,
+        "min_cluster_size":  min_cluster_size,
+        "seed":              seed,
+    }
+    config["cmd_args"] = [
+        sys.executable, "-u", str(SUPERMERGE_SCRIPT),
+        "--jobs-dir",         str(JOBS_ROOT),
+        "--output-dir",       str(out_dir),
+        "--top-n",            str(top_n),
+        "--min-cluster-size", str(min_cluster_size),
+        "--seed",             str(seed),
+    ]
 
     log_path = job_dir / "job.log"
     log_path.touch()

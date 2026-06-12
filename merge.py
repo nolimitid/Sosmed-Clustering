@@ -133,66 +133,71 @@ def run_merge(
     n_total = len(all_centroids)
     print(f"[merge] total centroid lokal: {n_total} dari {len(chunk_dirs)} chunk")
 
-    if n_total < max(2, target_min):
-        sys.exit(f"[merge] hanya {n_total} centroid lokal — tidak cukup untuk cluster "
-                 f"ke {target_min} topik global. Pastikan semua chunk sudah selesai.")
-
-    # Mapping: row_idx → (chunk_idx, local_topic_id)
+    # Mapping: row_idx -> (chunk_idx, local_topic_id)
     origins: list[tuple[int, int]] = []
     for ci, chunk in enumerate(all_chunks):
         for tid in chunk["topic_ids"]:
             origins.append((ci, tid))
 
-    # ---- UMAP + HDBSCAN pada semua centroid lokal ----
-    from hdbscan import HDBSCAN
-    from umap import UMAP
+    too_few = n_total < max(2, target_min)
+    if too_few:
+        print(f"[merge] PERINGATAN: hanya {n_total} centroid lokal < target_min={target_min}. "
+              f"Lanjut dengan {n_total} topik global (tiap centroid lokal = 1 global topic).")
 
-    mcs = min_cluster_size
-    if mcs == 0:
-        # heuristik: targetkan ~target_max global topics dari n_total local centroids
-        mcs = max(2, n_total // (target_max * 4))
-        mcs = min(mcs, max(2, n_total // max(target_min, 1)))
+    if too_few:
+        # Skip UMAP/HDBSCAN — tiap centroid lokal langsung jadi 1 global topic
+        raw_labels = np.arange(n_total, dtype=np.int32)
+    else:
+        # ---- UMAP + HDBSCAN pada semua centroid lokal ----
+        from hdbscan import HDBSCAN
+        from umap import UMAP
 
-    n_neighbors = min(15, n_total - 1)
-    n_components = min(5, n_total - 2)
-    print(f"[merge] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
-          f"HDBSCAN(min_cluster_size={mcs}) pada {n_total} centroid")
+        mcs = min_cluster_size
+        if mcs == 0:
+            # heuristik: targetkan ~target_max global topics dari n_total local centroids
+            mcs = max(2, n_total // (target_max * 4))
+            mcs = min(mcs, max(2, n_total // max(target_min, 1)))
 
-    umap_model = UMAP(
-        n_neighbors=n_neighbors,
-        n_components=n_components,
-        min_dist=0.0,
-        metric="cosine",
-        random_state=seed,
-    )
-    reduced = umap_model.fit_transform(all_centroids)
+        n_neighbors = min(15, n_total - 1)
+        n_components = min(5, n_total - 2)
+        print(f"[merge] UMAP(n_neighbors={n_neighbors}, n_components={n_components}) + "
+              f"HDBSCAN(min_cluster_size={mcs}) pada {n_total} centroid")
 
-    hdbscan_model = HDBSCAN(
-        min_cluster_size=mcs,
-        min_samples=max(1, mcs // 4),
-        metric="euclidean",
-        cluster_selection_method="eom",
-        prediction_data=True,
-    )
-    raw_labels = hdbscan_model.fit_predict(reduced)
-    n_natural = len(set(raw_labels.tolist()) - {-1})
-    print(f"[merge] klaster global alami: {n_natural}")
+        umap_model = UMAP(
+            n_neighbors=n_neighbors,
+            n_components=n_components,
+            min_dist=0.0,
+            metric="cosine",
+            random_state=seed,
+        )
+        reduced = umap_model.fit_transform(all_centroids)
 
-    # Kurangi bila > target_max
-    if n_natural > target_max:
-        print(f"[merge] mengurangi {n_natural} -> {target_max} topik global "
-              f"(AgglomerativeClustering)")
-        from sklearn.cluster import AgglomerativeClustering
-        valid_mask = raw_labels != -1
-        agg = AgglomerativeClustering(n_clusters=target_max, metric="euclidean",
-                                      linkage="ward")
-        new_valid = agg.fit_predict(reduced[valid_mask])
-        raw_labels[valid_mask] = new_valid
-        raw_labels[~valid_mask] = -1
+        hdbscan_model = HDBSCAN(
+            min_cluster_size=mcs,
+            min_samples=max(1, mcs // 4),
+            metric="euclidean",
+            cluster_selection_method="eom",
+            prediction_data=True,
+        )
+        raw_labels = hdbscan_model.fit_predict(reduced)
+        n_natural = len(set(raw_labels.tolist()) - {-1})
+        print(f"[merge] klaster global alami: {n_natural}")
 
-    if n_natural < target_min:
-        print(f"[merge] PERINGATAN: {n_natural} topik global < target_min={target_min}. "
-              f"Data atau jumlah chunk mungkin belum cukup banyak.")
+        # Kurangi bila > target_max
+        if n_natural > target_max:
+            print(f"[merge] mengurangi {n_natural} -> {target_max} topik global "
+                  f"(AgglomerativeClustering)")
+            from sklearn.cluster import AgglomerativeClustering
+            valid_mask = raw_labels != -1
+            agg = AgglomerativeClustering(n_clusters=target_max, metric="euclidean",
+                                          linkage="ward")
+            new_valid = agg.fit_predict(reduced[valid_mask])
+            raw_labels[valid_mask] = new_valid
+            raw_labels[~valid_mask] = -1
+
+        if n_natural < target_min:
+            print(f"[merge] PERINGATAN: {n_natural} topik global < target_min={target_min}. "
+                  f"Data atau jumlah chunk mungkin belum cukup banyak.")
 
     # Assign outlier centroid lokal ke global topic terdekat (nearest centroid)
     valid_global_ids = sorted(set(raw_labels.tolist()) - {-1})
@@ -259,6 +264,10 @@ def run_merge(
     global_summary = pd.DataFrame(rows)
     global_summary.to_csv(output_dir / "global_topics_summary.csv", index=False)
     print(f"[merge] {len(rows)} topik global -> global_topics_summary.csv")
+
+    # Simpan g_centroids untuk super-merge lintas project
+    np.save(output_dir / "g_centroids.npy", g_centroids)
+    (output_dir / "g_centroid_ids.json").write_text(json.dumps(valid_global_ids))
 
     if graph_edges:
         pd.DataFrame(

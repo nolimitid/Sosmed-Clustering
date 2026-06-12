@@ -12,6 +12,8 @@ plotly>=5.18           # BERTopic visualizations
 networkx>=3.0          # visualisasi graph topik (topic_graph.html)
 safetensors>=0.4
 langdetect>=1.0.9      # deteksi bahasa (fallback Python murni, selalu terpasang)
+igraph>=0.11           # graf untuk Leiden community detection
+leidenalg>=0.10        # Leiden algorithm (meta-topic grouping)
 # Backend deteksi bahasa yang disarankan untuk jutaan baris (jauh lebih cepat
 # daripada langdetect; roda prabangun, tanpa kompilator C). Opsional:
 #   pip install fasttext-wheel

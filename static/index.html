@@ -59,6 +59,15 @@ details[open] summary::before{content:'▼ '}
 .btn-green:hover{background:#bbf7d0}
 .btn-red{background:#fee2e2;color:#b91c1c;border:1px solid #fca5a5}
 .btn-red:hover{background:#fca5a5}
+
+/* progress bar */
+.prog-wrap{margin-bottom:14px}
+.prog-label{display:flex;justify-content:space-between;font-size:.78rem;color:#64748b;margin-bottom:5px}
+.prog-bar{height:10px;background:#e2e8f0;border-radius:99px;overflow:hidden}
+.prog-fill{height:100%;background:#2563eb;border-radius:99px;transition:width .4s ease}
+.prog-stats{display:flex;gap:18px;font-size:.78rem;margin-top:7px;flex-wrap:wrap}
+.prog-stat{display:flex;align-items:center;gap:5px}
+.prog-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
 .form-actions{display:flex;justify-content:flex-end;margin-top:16px}
 
 /* token bar */
@@ -225,11 +234,46 @@ tr:hover td{background:#fafafa}
     </form>
   </div>
 
+  <!-- Super Merge -->
+  <div class="card">
+    <div class="card-title">Super Merge — Gabung Semua Project</div>
+    <form id="smform">
+      <div class="fg">
+        <div class="fgi">
+          <label>Top N Cluster</label>
+          <input type="number" id="smTopN" value="10" min="1" max="200">
+          <span class="hint">Ambil N cluster terbesar dari seluruh project (berdasarkan jumlah dokumen)</span>
+        </div>
+        <div class="fgi">
+          <label>Min Cluster Size</label>
+          <input type="number" id="smMcs" value="0" min="0">
+          <span class="hint">0 = otomatis</span>
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <button type="submit" class="btn btn-primary" id="smBtn">Jalankan Super Merge</button>
+      </div>
+    </form>
+  </div>
+
   <!-- Daftar Job -->
   <div class="card">
     <div class="tbl-hdr">
       <div class="card-title" style="margin:0">Daftar Job</div>
       <button class="btn btn-sm btn-gray" onclick="loadJobs()">Refresh</button>
+    </div>
+    <div id="progWrap" class="prog-wrap" style="display:none">
+      <div class="prog-label">
+        <span id="progText">Memuat...</span>
+        <span id="progPct">0%</span>
+      </div>
+      <div class="prog-bar"><div class="prog-fill" id="progFill" style="width:0%"></div></div>
+      <div class="prog-stats">
+        <div class="prog-stat"><div class="prog-dot" style="background:#22c55e"></div><span id="ps-done">0 Selesai</span></div>
+        <div class="prog-stat"><div class="prog-dot" style="background:#ef4444"></div><span id="ps-fail">0 Gagal</span></div>
+        <div class="prog-stat"><div class="prog-dot" style="background:#3b82f6"></div><span id="ps-run">0 Berjalan</span></div>
+        <div class="prog-stat"><div class="prog-dot" style="background:#94a3b8"></div><span id="ps-q">0 Antri</span></div>
+      </div>
     </div>
     <div id="jobList"><div class="empty">Memuat...</div></div>
   </div>
@@ -364,7 +408,35 @@ async function loadJobs() {
   } catch { renderJobs(null); }
 }
 
+function updateProgress(jobs) {
+  const wrap = document.getElementById('progWrap');
+  if (!jobs || !jobs.length) { wrap.style.display = 'none'; return; }
+
+  // Hitung hanya pipeline/supermerge jobs, bukan upload jobs
+  const pjobs = jobs.filter(j => j.config && (j.config.job_type === 'pipeline' || j.config.job_type === 'supermerge'));
+  if (!pjobs.length) { wrap.style.display = 'none'; return; }
+
+  const total   = pjobs.length;
+  const done    = pjobs.filter(j => j.status === 'done').length;
+  const failed  = pjobs.filter(j => j.status === 'failed' || j.status === 'cancelled').length;
+  const running = pjobs.filter(j => j.status === 'running').length;
+  const queued  = pjobs.filter(j => j.status === 'queued').length;
+  const finished = done + failed;
+  const pct     = total > 0 ? Math.round(finished / total * 100) : 0;
+
+  wrap.style.display = 'block';
+  document.getElementById('progFill').style.width = pct + '%';
+  document.getElementById('progPct').textContent  = pct + '%';
+  document.getElementById('progText').textContent =
+    `${finished}/${total} job selesai`;
+  document.getElementById('ps-done').textContent = done + ' Selesai';
+  document.getElementById('ps-fail').textContent = failed + ' Gagal';
+  document.getElementById('ps-run').textContent  = running + ' Berjalan';
+  document.getElementById('ps-q').textContent    = queued + ' Antri';
+}
+
 function renderJobs(jobs) {
+  updateProgress(jobs);
   const el = document.getElementById('jobList');
   if (!jobs) { el.innerHTML = '<div class="empty">Gagal terhubung ke server.</div>'; return; }
   if (!jobs.length) { el.innerHTML = '<div class="empty">Belum ada job. Buat pipeline job baru di atas.</div>'; return; }
@@ -595,6 +667,36 @@ document.getElementById('jform').addEventListener('submit', async e => {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Mulai Pipeline';
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Super Merge form
+// ---------------------------------------------------------------------------
+document.getElementById('smform').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = document.getElementById('smBtn');
+  btn.disabled = true;
+  btn.textContent = 'Memulai...';
+
+  const fd = new FormData();
+  fd.append('top_n',            document.getElementById('smTopN').value);
+  fd.append('min_cluster_size', document.getElementById('smMcs').value);
+
+  try {
+    const r = await fetch('/supermerge-jobs', { method: 'POST', headers: hdrs(), body: fd });
+    const d = await r.json();
+    if (r.ok) {
+      toast('Super Merge ' + d.id + ' dimulai!', 'ok');
+      loadJobs();
+    } else {
+      toast('Error: ' + (d.detail || JSON.stringify(d)), 'err');
+    }
+  } catch (err) {
+    toast('Gagal: ' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Jalankan Super Merge';
   }
 });
 

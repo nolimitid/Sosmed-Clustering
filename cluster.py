@@ -135,8 +135,9 @@ def embed_texts(
         tmp.rename(part)
         done = hi
         rate = done / max(time.time() - t0, 1e-9)
+        pct  = done / n * 100
         print(f"[embed] chunk {ci + 1}/{n_chunks} selesai "
-              f"({done}/{n}, ~{rate:.0f} teks/dtk, "
+              f"({done:,}/{n:,} = {pct:.1f}%, ~{rate:.0f} teks/dtk, "
               f"perkiraan sisa {(n - done) / max(rate, 1e-9) / 60:.1f} menit)")
 
     # gabungkan part menjadi satu memmap tanpa memuat semuanya ke RAM

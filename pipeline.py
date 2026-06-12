@@ -147,13 +147,26 @@ def main() -> None:
                 sys.exit(1)
         else:
             print(f"\n[pipeline] {len(chunk_files)} chunk ditemukan untuk di-cluster")
+
+            # Hitung total baris tiap parquet (cepat via metadata) untuk progress %
+            import pyarrow.parquet as _pq
+            chunk_rows: list[int] = []
+            for cf in chunk_files:
+                try:
+                    chunk_rows.append(_pq.read_metadata(cf).num_rows)
+                except Exception:
+                    chunk_rows.append(0)
+            total_rows  = sum(chunk_rows)
+            rows_done   = 0
+
             failed: list[str] = []
-            for chunk_path in chunk_files:
+            for ci_idx, chunk_path in enumerate(chunk_files):
                 chunk_stem = chunk_path.stem        # "chunk_00000"
                 cluster_dir = out_dir / f"cluster_{chunk_stem}"
                 done_file = cluster_dir / "cluster.done"
 
                 if done_file.exists():
+                    rows_done += chunk_rows[ci_idx]
                     print(f"[pipeline] {chunk_stem}: sudah di-cluster, dilewati")
                     continue
 
@@ -183,9 +196,15 @@ def main() -> None:
                             "--lang-backend", args.lang_backend]
 
                 rc = run_cmd(cmd, f"cluster {chunk_stem}")
+                rows_done += chunk_rows[ci_idx]
+                pct = rows_done / max(total_rows, 1) * 100
+                n_done_chunks = ci_idx + 1
                 if rc != 0:
                     print(f"[pipeline] PERINGATAN: {chunk_stem} gagal, lanjut ke chunk berikutnya")
                     failed.append(chunk_stem)
+                print(f"[pipeline] progress clustering: "
+                      f"{n_done_chunks}/{len(chunk_files)} chunk "
+                      f"({rows_done:,}/{total_rows:,} baris = {pct:.1f}%)")
 
             done_count = sum(
                 1 for f in chunk_files
