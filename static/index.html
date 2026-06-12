@@ -27,8 +27,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .fgi{display:flex;flex-direction:column;gap:4px}
 .fgi.full{grid-column:1/-1}
 label{font-size:.72rem;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
-input[type=text],input[type=number],select{padding:8px 11px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.88rem;color:#1e293b;background:#fff;transition:border-color .15s;width:100%}
-input:focus,select:focus{outline:none;border-color:#3b82f6}
+input[type=text],input[type=number],select,textarea{padding:8px 11px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.88rem;color:#1e293b;background:#fff;transition:border-color .15s;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:#3b82f6}
 .hint{font-size:.72rem;color:#94a3b8;margin-top:2px}
 .range-row{display:grid;grid-template-columns:1fr 18px 1fr;align-items:center;gap:6px}
 .range-row span{text-align:center;color:#94a3b8;font-weight:600}
@@ -152,9 +152,11 @@ tr:hover td{background:#fafafa}
       <div class="fg">
 
         <div class="fgi full">
-          <label>Project ID *</label>
-          <input type="text" id="fProjId" placeholder="misal: e4d55ffd-1234-abcd-..." required autocomplete="off">
-          <span class="hint">UUID project di Elasticsearch — data dari semua 4 index bulan Mei–Juni 2026 akan diambil</span>
+          <label>Project ID * (boleh banyak)</label>
+          <textarea id="fProjId" rows="3" required autocomplete="off"
+                    style="resize:vertical;min-height:46px;font-family:inherit"
+                    placeholder="satu atau banyak UUID — pisahkan dengan baris baru, koma, atau spasi&#10;e4d55ffd-1234-abcd-...&#10;a1b2c3d4-5678-efgh-..."></textarea>
+          <span class="hint">UUID project di Elasticsearch. Boleh lebih dari satu — tiap project jadi job terpisah dan dijalankan satu per satu. Data dari semua 4 index bulan Mei–Juni 2026 akan diambil.</span>
         </div>
 
         <div class="fgi">
@@ -649,54 +651,68 @@ async function deleteJob(id) {
 // ---------------------------------------------------------------------------
 document.getElementById('jform').addEventListener('submit', async e => {
   e.preventDefault();
-  const pid = document.getElementById('fProjId').value.trim();
-  if (!pid) { toast('Project ID wajib diisi', 'err'); return; }
+  // Boleh banyak project_id: dipisah baris baru, koma, atau spasi (duplikat dibuang)
+  const ids = [...new Set(
+    document.getElementById('fProjId').value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean)
+  )];
+  if (!ids.length) { toast('Project ID wajib diisi', 'err'); return; }
 
   const btn = document.getElementById('subBtn');
   btn.disabled = true;
-  btn.textContent = 'Memulai...';
 
-  const fd = new FormData();
-  fd.append('project_id', pid);
-  fd.append('max_docs',   document.getElementById('fMaxDocs').value);
-  fd.append('chunk_size', document.getElementById('fChunk').value);
-  fd.append('target_min', document.getElementById('fTMin').value);
-  fd.append('target_max', document.getElementById('fTMax').value);
-  fd.append('model',      document.getElementById('fModel').value);
-  fd.append('keep_langs', document.getElementById('fLangs').value);
-  fd.append('assign_outliers', document.getElementById('fOutliers').checked);
-  fd.append('no_lang_filter',  document.getElementById('fNoLang').checked);
-  fd.append('batch_size', document.getElementById('fBatch').value);
+  // Parameter yang sama untuk semua project
+  const common = {
+    max_docs:        document.getElementById('fMaxDocs').value,
+    chunk_size:      document.getElementById('fChunk').value,
+    target_min:      document.getElementById('fTMin').value,
+    target_max:      document.getElementById('fTMax').value,
+    model:           document.getElementById('fModel').value,
+    keep_langs:      document.getElementById('fLangs').value,
+    assign_outliers: document.getElementById('fOutliers').checked,
+    no_lang_filter:  document.getElementById('fNoLang').checked,
+    batch_size:      document.getElementById('fBatch').value,
+  };
   const dev = document.getElementById('fDevice').value;
-  if (dev) fd.append('device', dev);
-  const od = document.getElementById('fOutDir').value.trim();
-  if (od) fd.append('output_dir', od);
+  const od  = document.getElementById('fOutDir').value.trim();
 
-  try {
-    const r = await fetch('/pipeline-jobs', { method: 'POST', headers: hdrs(), body: fd });
-    const d = await r.json();
-    if (r.ok) {
-      toast('Job ' + d.id + ' dimulai!', 'ok');
-      document.getElementById('jform').reset();
-      // restore defaults
-      document.getElementById('fMaxDocs').value  = 0;
-      document.getElementById('fChunk').value    = 100000;
-      document.getElementById('fTMin').value     = 20;
-      document.getElementById('fTMax').value     = 50;
-      document.getElementById('fModel').value    = 'LazarusNLP/all-indo-e5-small-v4';
-      document.getElementById('fLangs').value    = 'id,ms,jv,su,min,ban,ace';
-      document.getElementById('fBatch').value    = 128;
-      document.getElementById('fOutliers').checked = true;
-      loadJobs();
-    } else {
-      toast('Error: ' + (d.detail || JSON.stringify(d)), 'err');
+  // Kirim satu request per project, berurutan. Worker tunggal menjalankannya satu per satu.
+  let ok = 0; const failed = [];
+  for (let i = 0; i < ids.length; i++) {
+    btn.textContent = ids.length > 1 ? `Memulai ${i + 1}/${ids.length}...` : 'Memulai...';
+    const fd = new FormData();
+    fd.append('project_id', ids[i]);
+    for (const [k, v] of Object.entries(common)) fd.append(k, v);
+    if (dev) fd.append('device', dev);
+    // Output folder manual hanya aman untuk 1 project; bila banyak, biarkan auto per-job agar tak bentrok
+    if (od && ids.length === 1) fd.append('output_dir', od);
+    try {
+      const r = await fetch('/pipeline-jobs', { method: 'POST', headers: hdrs(), body: fd });
+      const d = await r.json();
+      if (r.ok) ok++; else failed.push(`${ids[i].slice(0, 8)}…: ${d.detail || 'error'}`);
+    } catch (err) {
+      failed.push(`${ids[i].slice(0, 8)}…: ${err.message}`);
     }
-  } catch (err) {
-    toast('Gagal: ' + err.message, 'err');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Mulai Pipeline';
   }
+
+  if (ok) {
+    toast(ids.length > 1
+      ? `${ok} pipeline job dimulai (dari ${ids.length} project, dijalankan satu per satu)!`
+      : `Job dimulai!`, 'ok');
+    document.getElementById('jform').reset();
+    document.getElementById('fMaxDocs').value     = 0;
+    document.getElementById('fChunk').value       = 100000;
+    document.getElementById('fTMin').value        = 20;
+    document.getElementById('fTMax').value        = 50;
+    document.getElementById('fModel').value       = 'LazarusNLP/all-indo-e5-small-v4';
+    document.getElementById('fLangs').value       = 'id,ms,jv,su,min,ban,ace';
+    document.getElementById('fBatch').value       = 128;
+    document.getElementById('fOutliers').checked  = true;
+  }
+  if (failed.length) toast(`${failed.length} gagal: ${failed.slice(0, 3).join(' | ')}`, 'err');
+
+  loadJobs();
+  btn.disabled = false;
+  btn.textContent = 'Mulai Pipeline';
 });
 
 // ---------------------------------------------------------------------------
