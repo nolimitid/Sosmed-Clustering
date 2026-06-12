@@ -258,14 +258,14 @@ tr:hover td{background:#fafafa}
 
   <!-- Super Merge dari CSV -->
   <div class="card">
-    <div class="card-title">Super Merge — Upload CSV Topics Summary</div>
+    <div class="card-title">Super Merge — Upload CSV / ZIP Topics Summary</div>
     <form id="smcsvform">
       <div class="fg">
         <div class="fgi full">
-          <label>File CSV Topics Summary *</label>
-          <input type="file" id="smcsvFiles" accept=".csv" multiple required
+          <label>File CSV / ZIP Topics Summary *</label>
+          <input type="file" id="smcsvFiles" accept=".csv,.zip" multiple required
                  style="padding:6px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.88rem;background:#fff;width:100%">
-          <span class="hint">Upload 1 atau banyak file CSV (topics_summary per project). Semua akan digabung menjadi 1 hasil.</span>
+          <span class="hint">Upload banyak file .csv, atau 1 file .zip berisi banyak CSV (akan diekstrak otomatis). Semua digabung menjadi 1 hasil.</span>
           <span id="smcsvCount" style="font-size:.78rem;color:#3b82f6;margin-top:3px"></span>
         </div>
         <div class="fgi">
@@ -756,7 +756,7 @@ document.getElementById('smcsvform').addEventListener('submit', async e => {
     const r = await fetch('/supermerge-csv-jobs', { method: 'POST', headers: hdrs(), body: fd });
     const d = await r.json();
     if (r.ok) {
-      toast(`Super Merge CSV ${d.id} dimulai! (${files.length} file)`, 'ok');
+      toast(`Super Merge CSV ${d.id} dimulai! (${(d.config && d.config.n_files) || files.length} CSV)`, 'ok');
       document.getElementById('smcsvform').reset();
       document.getElementById('smcsvCount').textContent = '';
       loadJobs();

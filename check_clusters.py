@@ -95,7 +95,9 @@ def print_top(report: dict, top: int) -> None:
     sizes = report["sizes"].head(top)
     kw = report["keywords"]
     rel = report["path"]
-    print(f"\n=== {top} cluster terbesar — {rel} ===")
+    total = report["n_clusters"]
+    note = "" if total >= top else f" (hanya {total} cluster)"
+    print(f"\n=== {top} cluster terbesar{note} — {rel} ===")
     if sizes.empty:
         print("  (tidak ada cluster valid)")
         return
@@ -139,7 +141,9 @@ def main() -> None:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--output-dir", help="folder keluaran pipeline (berisi merged/ & cluster_chunk_*/)")
     g.add_argument("--csv", help="periksa satu berkas CSV saja")
-    p.add_argument("--top", type=int, default=10, help="jumlah cluster terbesar yang dicetak (default 10)")
+    p.add_argument("--top", type=int, nargs="+", default=[10, 50],
+                   help="level cluster terbesar yang dicetak; boleh beberapa "
+                        "(default: 10 50 -> cetak top 10 lalu top 50)")
     p.add_argument("--per-file", action="store_true",
                    help="cetak top cluster untuk SETIAP CSV, bukan hanya hasil utama")
     args = p.parse_args()
@@ -165,13 +169,16 @@ def main() -> None:
         print(f"  {r['n_clusters']:>8}  {r['n_docs_clustered']:>12,}  "
               f"{r['n_outlier']:>9,}  {r['n_filtered']:>9,}  {rel}")
 
+    tops = list(dict.fromkeys(args.top))   # dedup, pertahankan urutan (mis. 10 lalu 50)
     if args.per_file or len(reports) == 1:
         for r in reports:
-            print_top(r, args.top)
+            for t in tops:
+                print_top(r, t)
     else:
         headline = pick_headline(reports, base)
         if headline is not None:
-            print_top(headline, args.top)
+            for t in tops:
+                print_top(headline, t)
             print("\n(gunakan --per-file untuk top cluster tiap CSV)")
 
 

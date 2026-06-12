@@ -48,6 +48,7 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -575,9 +576,41 @@ async def create_pipeline_job(
 # Super-merge jobs (gabung semua project, ambil top-N cluster terbesar)
 # ---------------------------------------------------------------------------
 
+def _unique_dest(dest_dir: Path, name: str) -> Path:
+    """Path di dest_dir untuk `name`, ditambah akhiran acak bila sudah ada."""
+    target = dest_dir / name
+    if target.exists():
+        target = dest_dir / f"{target.stem}_{uuid.uuid4().hex[:6]}{target.suffix}"
+    return target
+
+
+def _extract_csvs_from_zip(zip_path: Path, dest_dir: Path) -> list[Path]:
+    """Ekstrak hanya berkas .csv dari sebuah zip ke dest_dir (datar/flat).
+
+    Mengabaikan direktori, entri sampah macOS (__MACOSX, AppleDouble `._*`), dan
+    meratakan nama untuk mencegah zip-slip (path traversal lewat nama anggota).
+    """
+    out: list[Path] = []
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            parts = Path(member.filename).parts
+            if "__MACOSX" in parts:
+                continue
+            name = Path(member.filename).name           # ratakan, cegah zip-slip
+            if name.startswith("._") or not name.lower().endswith(".csv"):
+                continue
+            target = _unique_dest(dest_dir, name)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            out.append(target)
+    return out
+
+
 @app.post("/supermerge-csv-jobs", dependencies=AUTH)
 async def create_supermerge_csv_job(
-    files: list[UploadFile] = File(..., description="satu atau beberapa CSV topics_summary"),
+    files: list[UploadFile] = File(..., description="satu/beberapa CSV topics_summary, atau .zip berisi banyak CSV"),
     top_n: int = Form(10),
     model: str = Form("LazarusNLP/all-indo-e5-small-v4"),
     min_cluster_size: int = Form(0),
@@ -592,12 +625,37 @@ async def create_supermerge_csv_job(
 
     saved_paths: list[str] = []
     for f in files:
-        safe_name = Path(f.filename or "upload.csv").name  # strip directory components
-        if not safe_name:
-            safe_name = f"upload_{uuid.uuid4().hex[:8]}.csv"
-        dest = csv_dir / safe_name
-        dest.write_bytes(await f.read())
-        saved_paths.append(str(dest))
+        safe_name = Path(f.filename or "upload").name   # strip directory components
+        suffix = Path(safe_name).suffix.lower()
+        raw = await f.read()
+        if suffix == ".zip":
+            # Unggahan zip: ekstrak semua CSV di dalamnya
+            zpath = _unique_dest(csv_dir, safe_name or f"upload_{uuid.uuid4().hex[:8]}.zip")
+            zpath.write_bytes(raw)
+            try:
+                extracted = _extract_csvs_from_zip(zpath, csv_dir)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400,
+                                    detail=f"berkas zip rusak/tidak valid: {safe_name}")
+            finally:
+                zpath.unlink(missing_ok=True)           # zip mentah tak perlu disimpan
+            if not extracted:
+                raise HTTPException(status_code=400,
+                                    detail=f"tidak ada berkas .csv di dalam zip: {safe_name}")
+            saved_paths.extend(str(p) for p in extracted)
+        elif suffix == ".csv":
+            dest = _unique_dest(csv_dir, safe_name or f"upload_{uuid.uuid4().hex[:8]}.csv")
+            dest.write_bytes(raw)
+            saved_paths.append(str(dest))
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"format '{suffix}' tidak didukung; unggah .csv atau .zip",
+            )
+
+    if not saved_paths:
+        raise HTTPException(status_code=400,
+                            detail="tidak ada CSV yang bisa diproses dari unggahan")
 
     config = {
         "job_type":          "supermerge-csv",
