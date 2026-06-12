@@ -20,7 +20,14 @@ import pandas as pd
 
 
 def find_completed_projects(jobs_dir: Path) -> list[dict]:
-    projects = []
+    """Kumpulkan semua project selesai, lalu DEDUP per project_id.
+
+    Bila satu project_id diproses lebih dari sekali (mis. di-run ulang → ada
+    beberapa job dir dengan project_id sama), hanya run TERBARU (created_at
+    terbesar) yang dipakai. Tanpa ini, project duplikat akan dihitung ganda saat
+    super-merge (count & total membengkak, n_projects jadi tidak konsisten).
+    """
+    candidates = []
     for job_dir in sorted(jobs_dir.iterdir()):
         if not job_dir.is_dir():
             continue
@@ -33,21 +40,39 @@ def find_completed_projects(jobs_dir: Path) -> list[dict]:
         if not (g_centroids_path.exists() and g_ids_path.exists() and summary_path.exists()):
             continue
         project_id = job_dir.name
+        created_at = job_dir.stat().st_mtime          # fallback bila status.json tak ada
         status_path = job_dir / "status.json"
         if status_path.exists():
             try:
                 status = json.loads(status_path.read_text(encoding="utf-8"))
                 project_id = status.get("config", {}).get("project_id", project_id)
+                created_at = float(status.get("created_at") or created_at)
             except Exception:
                 pass
-        projects.append({
+        candidates.append({
             "job_id":            job_dir.name,
             "project_id":        project_id,
+            "created_at":        created_at,
             "g_centroids_path":  g_centroids_path,
             "g_ids_path":        g_ids_path,
             "summary_path":      summary_path,
         })
-    return projects
+
+    # Dedup per project_id: simpan hanya run dengan created_at terbesar
+    latest: dict[str, dict] = {}
+    skipped = 0
+    for c in candidates:
+        cur = latest.get(c["project_id"])
+        if cur is None:
+            latest[c["project_id"]] = c
+        else:
+            skipped += 1
+            if c["created_at"] > cur["created_at"]:
+                latest[c["project_id"]] = c   # ganti dengan run yang lebih baru
+    if skipped:
+        print(f"[supermerge] {skipped} run duplikat (project_id sama) dilewati — "
+              f"memakai run terbaru per project ({len(latest)} project unik)")
+    return sorted(latest.values(), key=lambda c: c["project_id"])
 
 
 def supermerge(
