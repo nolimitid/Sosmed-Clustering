@@ -291,7 +291,10 @@ tr:hover td{background:#fafafa}
   <div class="card">
     <div class="tbl-hdr">
       <div class="card-title" style="margin:0">Daftar Job</div>
-      <button class="btn btn-sm btn-gray" onclick="loadJobs()">Refresh</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm btn-gray" onclick="loadJobs()">Refresh</button>
+        <button class="btn btn-sm btn-red" onclick="clearInterrupted()">Hapus Terputus</button>
+      </div>
     </div>
     <div id="progWrap" class="prog-wrap" style="display:none">
       <div class="prog-label">
@@ -646,6 +649,22 @@ async function deleteJob(id) {
   const r = await fetch(`/jobs/${id}`, { method: 'DELETE', headers: hdrs() });
   if (r.ok) { toast('Job dihapus', 'ok'); loadJobs(); }
   else toast('Gagal hapus', 'err');
+}
+
+async function clearInterrupted() {
+  const res = await fetch('/jobs', { headers: hdrs() });
+  if (!res.ok) return;
+  const { jobs } = await res.json();
+  const targets = jobs.filter(j => j.status === 'interrupted');
+  if (!targets.length) { toast('Tidak ada job terputus', 'ok'); return; }
+  if (!confirm(`Hapus ${targets.length} job terputus?`)) return;
+  let ok = 0, fail = 0;
+  await Promise.all(targets.map(async j => {
+    const r = await fetch(`/jobs/${j.id}`, { method: 'DELETE', headers: hdrs() });
+    r.ok ? ok++ : fail++;
+  }));
+  toast(`${ok} job terputus dihapus${fail ? `, ${fail} gagal` : ''}`, ok ? 'ok' : 'err');
+  loadJobs();
 }
 
 // ---------------------------------------------------------------------------
