@@ -233,28 +233,62 @@ def _cluster_and_rank(
 
     print(f"[{label}] {len(valid_super)} super cluster ditemukan")
 
-    super_info: dict[int, dict] = {s: {"count": 0, "kw_parts": [], "sources": set()} for s in valid_super}
+    has_names    = any(meta.get("name")     for meta in rows_meta)
+    has_examples = any(meta.get("examples") for meta in rows_meta)
+    super_info: dict[int, dict] = {
+        s: {"count": 0, "kw_parts": [], "sources": set(),
+            "name_counter": Counter(), "example_parts": []}
+        for s in valid_super
+    }
     for i, s in enumerate(super_labels):
         meta = rows_meta[i]
-        super_info[int(s)]["count"]   += int(meta.get("count", 0))
+        si   = super_info[int(s)]
+        si["count"] += int(meta.get("count", 0))
         kw = str(meta.get("keywords", ""))
         if kw:
-            super_info[int(s)]["kw_parts"].append(kw)
+            si["kw_parts"].append(kw)
         src = meta.get("source", "")
         if src:
-            super_info[int(s)]["sources"].add(src)
+            si["sources"].add(src)
+        name = str(meta.get("name", "")).strip()
+        if name and name.lower() != "nan":
+            si["name_counter"][name] += 1
+        ex = str(meta.get("examples", "")).strip()
+        if ex and ex.lower() != "nan":
+            si["example_parts"].append(ex)
 
     out_rows = []
     for s in sorted(valid_super):
         info   = super_info[s]
         all_kw = " ".join(info["kw_parts"])
         top_kw = " ".join(w for w, _ in Counter(all_kw.split()).most_common(10))
-        out_rows.append({
+        row: dict = {
             "super_topic": s,
             "count":       info["count"],
             "n_sources":   len(info["sources"]),
-            "keywords":    top_kw,
-        })
+        }
+        if has_names:
+            # Ambil 3 nama cluster terbanyak dari topik anggota
+            row["top_names"] = " | ".join(
+                n for n, _ in info["name_counter"].most_common(3)
+            )
+        row["keywords"] = top_kw
+        if has_examples:
+            # Ambil maks 5 contoh dok unik dari topik-topik anggota
+            seen: set[str] = set()
+            picked: list[str] = []
+            for part in info["example_parts"]:
+                for doc in part.split(" ||| "):
+                    doc = doc.strip()
+                    if doc and doc not in seen:
+                        seen.add(doc)
+                        picked.append(doc)
+                    if len(picked) >= 5:
+                        break
+                if len(picked) >= 5:
+                    break
+            row["top5_docs"] = " ||| ".join(picked)
+        out_rows.append(row)
 
     df = pd.DataFrame(out_rows).sort_values("count", ascending=False).reset_index(drop=True)
     df.insert(0, "rank", df.index + 1)
@@ -297,18 +331,26 @@ def supermerge_from_csvs(
         if not count_col or not kw_col:
             print(f"[supermerge-csv] {csv_path.name}: kolom Count/Keywords tidak ditemukan, dilewati")
             continue
+        name_col = col_map.get("name")
+        # Top5CentroidDocs diutamakan karena berbasis centroid similarity; fallback ke Examples
+        ex_col   = col_map.get("top5centroiddocs") or col_map.get("examples")
         # Konversi Count ke numerik sekali (aman untuk nilai campuran)
         df[count_col] = pd.to_numeric(df[count_col], errors="coerce").fillna(0).astype(int)
         for _, row in df.iterrows():
             kw = str(row[kw_col]).strip()
             if not kw or kw.lower() == "nan":
                 continue
+            ex   = str(row[ex_col]).strip()   if ex_col   else ""
+            name = str(row[name_col]).strip()  if name_col else ""
             rows_meta.append({
                 "count":    int(row[count_col]),
                 "keywords": kw,
                 "source":   source,
+                "name":     name     if name.lower()     != "nan" else "",
+                "examples": ex       if ex.lower()       != "nan" else "",
             })
-        print(f"[supermerge-csv] {csv_path.name}: {len(df)} topik dimuat")
+        print(f"[supermerge-csv] {csv_path.name}: {len(df)} topik dimuat"
+              + (f" (top5: {ex_col})" if ex_col else ""))
 
     if not rows_meta:
         sys.exit("[supermerge-csv] tidak ada baris valid dari CSV yang diberikan")
