@@ -11,6 +11,7 @@ pyarrow>=14.0          # parquet support
 plotly>=5.18           # BERTopic visualizations
 networkx>=3.0          # visualisasi graph topik (topic_graph.html)
 safetensors>=0.4
+rake-nltk>=1.0.6       # ekstraksi keyphrase RAKE (kolom RakeKeywords di topics_summary.csv)
 langdetect>=1.0.9      # deteksi bahasa (fallback Python murni, selalu terpasang)
 igraph>=0.11           # graf untuk Leiden community detection
 leidenalg>=0.10        # Leiden algorithm (meta-topic grouping)

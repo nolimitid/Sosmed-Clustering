@@ -535,6 +535,44 @@ def compute_silhouette(topic_model, topics: list[int], max_sample: int = 20000) 
         return None
 
 
+def get_rake_keywords(
+    df: pd.DataFrame,
+    stopwords: list[str],
+    top_n: int = 10,
+    max_docs: int = 200,
+) -> dict[int, str]:
+    """Ekstrak keyphrase per topik dengan RAKE (rake-nltk) sebagai PELENGKAP
+    c-TF-IDF. Mengembalikan {topic_id: "frasa1; frasa2; ..."}.
+
+    Memakai extract_keywords_from_sentences (tokenizer regex wordpunct), jadi
+    TIDAK perlu unduhan data nltk (punkt). Stopword Indonesia diberikan eksplisit
+    agar tidak menyentuh korpus stopword nltk. RAKE dijalankan pada maksimal
+    max_docs dokumen acak per topik agar tetap cepat.
+    """
+    if "clean_text" not in df.columns or "topic" not in df.columns:
+        return {}
+    try:
+        from rake_nltk import Rake
+    except ImportError:
+        print("[rake] rake-nltk tidak terpasang; kolom RakeKeywords dilewati "
+              "(pip install rake-nltk)")
+        return {}
+
+    sw = set(stopwords)
+    result: dict[int, str] = {}
+    for tid, grp in df[df["topic"] >= 0].groupby("topic"):
+        docs = grp["clean_text"].dropna().astype(str)
+        docs = docs[docs.str.len() > 0]
+        if docs.empty:
+            continue
+        if len(docs) > max_docs:
+            docs = docs.sample(max_docs, random_state=0)
+        rake = Rake(stopwords=sw, max_length=4, include_repeated_phrases=False)
+        rake.extract_keywords_from_sentences(docs.tolist())
+        result[int(tid)] = "; ".join(rake.get_ranked_phrases()[:top_n])
+    return result
+
+
 def export_results(
     out_dir: Path,
     df: pd.DataFrame,
@@ -545,6 +583,7 @@ def export_results(
     graph_edges: dict[tuple[int, int], float] | None = None,
     centroids: np.ndarray | None = None,
     centroid_topic_ids: list[int] | None = None,
+    stopwords: list[str] | None = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -566,6 +605,11 @@ def export_results(
         examples.append(" ||| ".join((reps or [])[:3]))
     info["Keywords"] = keywords
     info["Examples"] = examples
+    # RakeKeywords: keyphrase RAKE sebagai pelengkap c-TF-IDF (kolom terpisah,
+    # tidak dipakai oleh merge/supermerge yang tetap memakai Keywords)
+    rake_map = get_rake_keywords(df, sorted(stopwords)) if stopwords else {}
+    if rake_map:
+        info["RakeKeywords"] = info["Topic"].map(lambda tid: rake_map.get(int(tid), ""))
     if centroid_docs_map:
         info["Top5CentroidDocs"] = info["Topic"].map(
             lambda tid: " ||| ".join(centroid_docs_map.get(tid, []))
@@ -846,7 +890,8 @@ def main() -> None:
     print(json.dumps(metrics, indent=2))
     export_results(out_dir, df.drop(columns=["informative"]), topic_model, metrics,
                    centroid_docs_map, meta_map, graph_edges,
-                   centroids=chunk_centroids, centroid_topic_ids=chunk_topic_ids)
+                   centroids=chunk_centroids, centroid_topic_ids=chunk_topic_ids,
+                   stopwords=stopwords)
 
     if args.done_file:
         Path(args.done_file).write_text("ok")
