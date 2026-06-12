@@ -227,6 +227,11 @@ tr:hover td{background:#fafafa}
             <label for="fNoLang">Nonaktifkan filter bahasa</label>
           </div>
 
+          <div class="chk">
+            <input type="checkbox" id="fBertopic">
+            <label for="fBertopic">Gunakan BERTopic/UMAP (lama, lebih lambat ~2x)</label>
+          </div>
+
         </div>
       </details>
 
@@ -692,6 +697,7 @@ document.getElementById('jform').addEventListener('submit', async e => {
     assign_outliers: document.getElementById('fOutliers').checked,
     no_lang_filter:  document.getElementById('fNoLang').checked,
     batch_size:      document.getElementById('fBatch').value,
+    use_bertopic:    document.getElementById('fBertopic').checked,
   };
   const dev = document.getElementById('fDevice').value;
   const od  = document.getElementById('fOutDir').value.trim();

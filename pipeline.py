@@ -101,6 +101,12 @@ def main() -> None:
     p.add_argument("--skip-merge", action="store_true",
                    help="lewati tahap merge global")
 
+    # ---- Algoritma cluster ----
+    p.add_argument("--use-bertopic", action="store_true",
+                   help="gunakan cluster.py (BERTopic/UMAP+HDBSCAN) "
+                        "sebagai pengganti default cluster_leiden.py; "
+                        "lebih lambat ~2x karena butuh UMAP")
+
     args = p.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -170,8 +176,9 @@ def main() -> None:
                     print(f"[pipeline] {chunk_stem}: sudah di-cluster, dilewati")
                     continue
 
+                cluster_script = "cluster.py" if args.use_bertopic else "cluster_leiden.py"
                 cmd = [
-                    py, "cluster.py",
+                    py, cluster_script,
                     "--input", str(chunk_path),
                     "--text-col", "content",
                     "--output-dir", str(cluster_dir),

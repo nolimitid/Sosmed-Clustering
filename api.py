@@ -128,6 +128,8 @@ def build_pipeline_command(config: dict, output_dir: Path) -> list[str]:
         cmd.append("--no-lang-filter")
     if config.get("assign_outliers"):
         cmd.append("--assign-outliers")
+    if config.get("use_bertopic"):
+        cmd.append("--use-bertopic")
     return cmd
 
 
@@ -537,6 +539,7 @@ async def create_pipeline_job(
     batch_size: int = Form(128),
     device: str | None = Form(None),
     seed: int = Form(42),
+    use_bertopic: bool = Form(False, description="gunakan BERTopic/UMAP (lebih lambat, default: Leiden)"),
 ) -> dict:
     job_id = uuid.uuid4().hex[:12]
     job_dir = JOBS_ROOT / job_id
@@ -559,6 +562,7 @@ async def create_pipeline_job(
         "batch_size": batch_size,
         "device": device,
         "seed": seed,
+        "use_bertopic": use_bertopic,
     }
     config["cmd_args"] = build_pipeline_command(config, out_dir)
 
